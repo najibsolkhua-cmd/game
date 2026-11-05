@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Холдинг — бизнес-игра</title>
+  <meta name="description" content="Карточная бизнес-игра: собирайте компании, торгуйте картами вслепую, натравливайте налоговую. 1 на 1 или до 4 игроков.">
+  <link rel="icon" href="assets/cards/sale.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&family=Unbounded:wght@600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<!-- ===== Меню ===== -->
+<section id="setup">
+  <div class="setup-box">
+    <div class="hero">
+      <div class="hero-cards">
+        <div class="card"><img src="assets/cards/back.svg" alt=""></div>
+        <div class="card"><img src="assets/cards/chem-prod-3.svg" alt=""></div>
+        <div class="card"><img src="assets/cards/forest-raw-3.svg" alt=""></div>
+        <div class="card"><img src="assets/cards/sale.svg" alt=""></div>
+      </div>
+      <h1>ХОЛДИНГ</h1>
+      <p class="tag">Собирайте компании из сырья, производства, склада и транспорта, продавайте их с прибылью, торгуйте картами в тёмную и натравливайте налоговую на конкурентов.</p>
+    </div>
+
+    <div class="panel">
+      <div id="mode-pick" class="modes">
+        <button class="mode-btn" data-mode="duel"><span class="ico">⚔️</span><div><b>1 на 1</b><span>Вы против бота · цель $50</span></div></button>
+        <button class="mode-btn" data-mode="four"><span class="ico">🏢</span><div><b>Вчетвером</b><span>Вы и 3 бота · цель $40</span></div></button>
+        <button class="mode-btn" data-mode="hotseat"><span class="ico">👥</span><div><b>За одним экраном</b><span>2–4 человека передают устройство по кругу</span></div></button>
+        <button class="mode-btn" data-mode="custom"><span class="ico">⚙️</span><div><b>Свой состав</b><span>Люди и боты в любой комбинации</span></div></button>
+      </div>
+
+      <div id="custom" class="hidden">
+        <div class="field"><label>Игроков:</label>
+          <div class="seg" id="count-seg"><button data-n="2">2</button><button data-n="3">3</button><button data-n="4" class="on">4</button></div>
+        </div>
+        <div class="seats" id="seats"></div>
+        <div class="field"><label>Цель, $:</label><input id="target" type="number" min="20" max="200" step="5" style="width:90px"></div>
+        <div class="btns" style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px">
+          <button class="btn ghost" id="custom-back">Назад</button>
+          <button class="btn primary big" id="custom-start">Начать игру</button>
+        </div>
+      </div>
+
+      <div class="setup-links">
+        <button class="btn small" data-open="rules">📖 Правила</button>
+        <button class="btn small" data-open="cards">🃏 Все карты</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== Игра ===== -->
+<section id="game" class="hidden">
+  <header class="topbar">
+    <span class="logo">ХОЛДИНГ</span>
+    <span class="goal">Цель: <b id="goal-v">$50</b> · Раунд <b id="round-v">1</b></span>
+    <span class="spacer"></span>
+    <select id="speed" title="Скорость ботов">
+      <option value="1.6">Боты: медленно</option>
+      <option value="1" selected>Боты: обычно</option>
+      <option value="0.4">Боты: быстро</option>
+    </select>
+    <button class="btn small" data-open="rules">Правила</button>
+    <button class="btn small ghost" id="to-menu">Меню</button>
+  </header>
+
+  <main class="board">
+    <div class="opponents" id="opponents"></div>
+    <div class="center">
+      <div class="pile" title="Колода (банк)"><div class="stack" id="deck"></div><div class="label" id="deck-label">Колода</div></div>
+      <div class="pile" title="Сброс"><div class="stack" id="discard"></div><div class="label" id="discard-label">Сброс</div></div>
+      <div class="status" id="status"></div>
+    </div>
+    <div class="me" id="me">
+      <div class="me-bar" id="me-bar"></div>
+      <div class="companies" id="companies"></div>
+      <div class="hand-wrap">
+        <div class="sel-actions" id="sel-actions"></div>
+        <div class="hand" id="hand"></div>
+      </div>
+    </div>
+  </main>
+
+  <aside class="sidebar">
+    <div class="side-head"><h3>Журнал сделок</h3></div>
+    <div class="log" id="log"></div>
+  </aside>
+</section>
+
+<div class="toasts" id="toasts"></div>
+<div id="modal-root"></div>
+
+<template id="rules-tpl">
+  <div class="rules">
+    <p><b>Холдинг</b> — карточная бизнес-игра на 2–4 игрока. Вы собираете компании из четырёх этапов, продаёте их и богатеете. Все карты лежат <b>рубашкой вверх</b> (рубашка — купюра $): соперники не знают, что у вас на руке, поэтому любая продажа и покупка карт между игроками идёт <b>вслепую, по рубашке</b>.</p>
+
+    <h3>Цель</h3>
+    <p>Первым накопить <b>$50</b> (вдвоём), <b>$45</b> (втроём) или <b>$40</b> (вчетвером). Победа засчитывается в конце вашего хода. Если колода закончилась окончательно — побеждает самый богатый.</p>
+
+    <h3>Колода (54 карты)</h3>
+    <ul>
+      <li><span class="chip" style="background:#b10dc9"></span><b>Химия</b>, <span class="chip" style="background:#e46f0a"></span><b>Лес</b>, <span class="chip" style="background:#e00000"></span><b>Стройка</b> — по 12 карт этапов: <b>Сырьё → Производство → Склад → Транспорт</b>, каждый этап в трёх уровнях: обычный, <b>(+2)</b> и <b>(+3)</b>.</li>
+      <li><b>Универсальные</b> (по 2 на отрасль) — заменяют любой этап своей отрасли. Не заменяют «Продажу».</li>
+      <li><b>Налоговая</b> ×6 — посмотрите все карты любого игрока и одну заберите себе или отправьте в сброс (можно и с руки, и со стола).</li>
+      <li><b>Продажа</b> ×6 — продаёт собранную компанию.</li>
+    </ul>
+
+    <h3>Подготовка</h3>
+    <p>Каждый получает 5 карт и $10. Каждый следующий по очереди игрок получает +$1 (второй — $11, третий — $12, четвёртый — $13) — компенсация за очерёдность.</p>
+
+    <h3>Ход игрока</h3>
+    <ol>
+      <li><b>Доход:</b> возьмите 1 карту из колоды бесплатно.</li>
+      <li><b>Стройка (бесплатно, сколько угодно):</b> выкладывайте этапы в свои компании. В каждой отрасли у вас одна компания с 4 местами. Если место занято — новая карта встаёт на него, а старая возвращается в руку (так улучшают этапы и заменяют универсальные).</li>
+      <li><b>Продажа (бесплатно):</b> если компания собрана (все 4 этапа), сыграйте карту «Продажа» и получите деньги.</li>
+      <li><b>До 2 сделок</b> на выбор (можно одну и ту же дважды):
+        <ul>
+          <li><b>Купить у банка в тёмную</b> — $3 за верхнюю карту колоды.</li>
+          <li><b>Продать банку по рубашке</b> — любая карта с руки за $2 (банк не смотрит, что это).</li>
+          <li><b>Предложить карту игроку</b> — рубашкой вверх, за свою цену. Можно сделать <b>заявку</b> («Это Продажа!», «Это Химия» и т.п.) — <b>заявка может быть блефом</b>. Покупатель соглашается или отказывается.</li>
+          <li><b>Купить у игрока в тёмную</b> — назовите цену; если продавец согласен, вы сами вытягиваете любую карту из его руки по рубашке.</li>
+          <li><b>Сыграть «Налоговую»</b>.</li>
+        </ul>
+      </li>
+      <li><b>Лимит руки — 7 карт.</b> Лишние в конце хода распродаются банку по $1.</li>
+    </ol>
+
+    <h3>Сколько стоит компания</h3>
+    <p><b>$12</b> + бонусы этапов (+2 / +3) + <b>$3 «Чистый бизнес»</b>, если в компании нет универсальных карт.</p>
+    <table>
+      <tr><th>Состав</th><th>Выплата</th></tr>
+      <tr><td>4 обычных этапа</td><td>$12 + $3 = $15</td></tr>
+      <tr><td>3 обычных + универсальная</td><td>$12</td></tr>
+      <tr><td>Все этапы (+3)</td><td>$12 + $12 + $3 = <b>$27</b></td></tr>
+    </table>
+
+    <h3>Советы</h3>
+    <ul>
+      <li>Выложенные этапы видят все — и налоговая может их изъять. Иногда выгодно придержать карты на руке.</li>
+      <li>«Продаж» всего 6 на колоду. Если у соперника собрана компания — проверьте его налоговой, пока он не нашёл «Продажу».</li>
+      <li>Ненужные карты продавайте соперникам дороже, чем банку, — главное убедительно заявить, что это.</li>
+    </ul>
+  </div>
+</template>
+
+<script src="js/cards.js"></script>
+<script src="js/engine.js"></script>
+<script src="js/ai.js"></script>
+<script src="js/ui.js"></script>
+</body>
+</html>
