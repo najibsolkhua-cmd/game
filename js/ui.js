@@ -1,4 +1,4 @@
-/* Интерфейс «Холдинга» */
+/* Интерфейс «Холдинга»: всё на одном экране, действия перетаскиванием (мышь и палец). */
 (function () {
   'use strict';
   const C = window.HoldingCards, E = window.HoldingEngine, AI = window.HoldingAI;
@@ -15,30 +15,32 @@
   ];
   const HUMAN_AVAS = ['🙂', '😎', '🤠', '🧐'];
   const PROFILE_LABELS = { balanced: 'Бот: сбалансированный', trader: 'Бот: торговец', shark: 'Бот: акула', careful: 'Бот: осторожный' };
-  const TYPE_ORDER = { stage: 0, wild: 1, tax: 2, sale: 3 };
+  const TYPE_ORDER = { stage: 0, wild: 1, sale: 2, tax: 3, lawyer: 4, share: 5 };
   const CARD_BY_ID = {};
   for (const c of C.buildDeck()) CARD_BY_ID[c.id] = c;
+  for (const c of C.buildEventDeck()) CARD_BY_ID[c.id] = c;
+  const SALE_CARD = Object.values(CARD_BY_ID).find((c) => c.type === 'sale');
 
   const S = {
-    game: null, seats: null, humans: [], viewer: null,
-    selected: null, mode: null, endTurn: null, busy: false,
-    speed: 1, knownHand: new Set(), lastMoney: {}, renderQueued: false, curtainOpen: false,
+    game: null, seats: null, humans: [], viewer: null, events: true,
+    endTurn: null, busy: false, speed: 1,
+    knownHand: new Set(), lastMoney: {}, renderQueued: false, curtainOpen: false,
   };
 
   // ======================== Карты ========================
   function cardHTML(card, opts) {
     opts = opts || {};
-    const cls = ['card'];
-    if (opts.cls) cls.push(opts.cls);
     const attrs = [];
     if (opts.zoom !== false) attrs.push(`data-zoom="${card.id}"`);
     if (opts.cid != null) attrs.push(`data-cid="${opts.cid}"`);
+    if (opts.drag) attrs.push(`data-drag="${opts.drag}"`);
     if (opts.k != null) attrs.push(`data-k="${esc(opts.k)}"`);
-    return `<div class="${cls.join(' ')}" ${attrs.join(' ')} title="${esc(card.title)}"><img src="${card.img}" alt="${esc(card.title)}" draggable="false"></div>`;
+    if (opts.style) attrs.push(`style="${opts.style}"`);
+    return `<div class="card ${opts.cls || ''}" ${attrs.join(' ')} title="${esc(card.title)}"><img src="${card.img}" alt="${esc(card.title)}" draggable="false"></div>`;
   }
   function backHTML(opts) {
     opts = opts || {};
-    return `<div class="card back ${opts.cls || ''}" ${opts.k != null ? `data-k="${opts.k}"` : ''}><img src="${C.BACK_IMG}" alt="Рубашка" draggable="false"></div>`;
+    return `<div class="card back ${opts.cls || ''}" ${opts.k != null ? `data-k="${opts.k}"` : ''}><img src="${opts.img || C.BACK_IMG}" alt="Рубашка" draggable="false"></div>`;
   }
   function sortHand(hand) {
     return hand.slice().sort((a, b) =>
@@ -47,10 +49,10 @@
       (C.STAGE_ORDER.indexOf(a.stage) - C.STAGE_ORDER.indexOf(b.stage)) ||
       ((b.tier || 0) - (a.tier || 0)) || (a.id - b.id));
   }
+  function plural(n, a, b, c) { const m10 = n % 10, m100 = n % 100; if (m10 === 1 && m100 !== 11) return a; if (m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20)) return b; return c; }
 
   // ======================== Модальные окна ========================
   function openModal(o) {
-    const root = $('#modal-root');
     const ov = document.createElement('div');
     ov.className = 'overlay ' + (o.overlayCls || '');
     ov.innerHTML = `<div class="modal ${o.wide ? 'wide' : ''} ${o.cls || ''}">
@@ -58,13 +60,12 @@
       <div class="m-body">${o.html || ''}</div>
       ${(o.buttons && o.buttons.length) ? `<div class="btns">${o.buttons.map((b, i) => `<button class="btn ${b.cls || ''}" data-bi="${i}" ${b.disabled ? 'disabled' : ''}>${b.label}</button>`).join('')}</div>` : ''}
     </div>`;
-    root.appendChild(ov);
+    $('#modal-root').appendChild(ov);
     let resolve;
     const result = new Promise((r) => (resolve = r));
     const m = {
-      el: ov,
-      result,
-      close(v) { ov.remove(); resolve(v); },
+      el: ov, result,
+      close(v) { if (!ov.isConnected) return; ov.remove(); resolve(v); },
       btn(i) { return ov.querySelector(`[data-bi="${i}"]`); },
     };
     ov.addEventListener('click', (e) => {
@@ -72,7 +73,6 @@
       if (b && !b.disabled) {
         const def = o.buttons[+b.dataset.bi];
         const v = def.value !== undefined ? def.value : def.label;
-        if (def.onClick) { const r = def.onClick(m); if (r === false) return; }
         m.close(typeof v === 'function' ? v(m) : v);
         return;
       }
@@ -82,34 +82,32 @@
     return m;
   }
 
-  function zoomCard(card) {
-    openModal({ html: `<div class="zoom">${cardHTML(card, { zoom: false })}<p><b>${esc(card.title)}</b></p></div>`, dismiss: true, buttons: [{ label: 'Закрыть', value: null }] });
-  }
-
   function showRules() {
     openModal({ title: 'Правила игры «Холдинг»', wide: true, html: $('#rules-tpl').innerHTML, dismiss: true, buttons: [{ label: 'Понятно', cls: 'primary' }] });
   }
-
   function showGallery() {
     const uniq = {};
-    for (const c of Object.values(CARD_BY_ID)) { const k = c.img; if (!uniq[k]) uniq[k] = c; }
+    for (const c of Object.values(CARD_BY_ID)) if (!uniq[c.img]) uniq[c.img] = c;
+    const all = Object.values(uniq);
     const groups = [
       ['Химическая промышленность', (c) => c.ind === 'chem' && c.type === 'stage'],
       ['Лесная промышленность', (c) => c.ind === 'forest' && c.type === 'stage'],
       ['Строительная промышленность', (c) => c.ind === 'build' && c.type === 'stage'],
-      ['Особые карты', (c) => c.type !== 'stage'],
+      ['Особые карты', (c) => ['wild', 'sale', 'tax', 'lawyer', 'share'].includes(c.type)],
+      ['События рынка (отдельная колода)', (c) => c.type === 'event'],
     ];
-    const html = groups.map(([t, f]) => `<div class="section-label">${t}</div><div class="gallery">${Object.values(uniq).filter(f).map((c) => cardHTML(c)).join('')}</div>`).join('')
-      + `<div class="section-label">Рубашка</div><div class="gallery">${backHTML()}</div>`;
-    openModal({ title: 'Все карты колоды', wide: true, html, dismiss: true, buttons: [{ label: 'Закрыть' }] });
+    const html = groups.map(([t, f]) => `<div class="section-label">${t}</div><div class="gallery">${all.filter(f).map((c) => cardHTML(c)).join('')}</div>`).join('')
+      + `<div class="section-label">Рубашки</div><div class="gallery">${backHTML()}${backHTML({ img: C.EVENT_BACK_IMG })}${backHTML({ img: 'assets/cards/back-classic.svg' })}</div>`;
+    openModal({ title: 'Все карты', wide: true, html, dismiss: true, buttons: [{ label: 'Закрыть' }] });
   }
 
-  // ======================== Тосты и анимации ========================
-  function toast(text, card, ms) {
+  // ======================== Тосты ========================
+  function toast(text, card, ms, big) {
     const el = document.createElement('div');
-    el.className = 'toast';
+    el.className = 'toast' + (big ? ' big' : '');
     el.innerHTML = (card ? cardHTML(card, { zoom: false }) : '') + `<div>${text}</div>`;
     $('#toasts').appendChild(el);
+    while ($('#toasts').children.length > (window.innerWidth < 700 ? 2 : 4)) $('#toasts').firstChild.remove();
     setTimeout(() => { el.classList.add('out'); setTimeout(() => el.remove(), 320); }, ms || 2600);
   }
   function floatMoney(el, delta) {
@@ -155,12 +153,12 @@
     $('#custom').classList.remove('hidden');
     renderSeats();
   }
-
   function initMenu() {
     $('#mode-pick').addEventListener('click', (e) => {
       const b = e.target.closest('[data-mode]');
       if (!b) return;
       const m = b.dataset.mode;
+      S.events = true;
       if (m === 'duel') startGame([{ name: 'Игрок', type: 'human', ava: '🙂' }, Object.assign({ type: 'bot' }, BOTS[2])]);
       else if (m === 'four') startGame(defaultSeats(4, false));
       else if (m === 'hotseat') openCustom(true, 2);
@@ -187,13 +185,14 @@
       if (e.target.dataset.f === 'type') {
         const v = e.target.value;
         if (v === 'human') { s.type = 'human'; s.ava = HUMAN_AVAS[+row.dataset.i]; }
-        else { s.type = 'bot'; s.profile = v.split(':')[1]; const bt = BOTS.find((b) => b.profile === s.profile); s.ava = bt.ava; }
+        else { s.type = 'bot'; s.profile = v.split(':')[1]; s.ava = BOTS.find((b) => b.profile === s.profile).ava; }
         row.querySelector('.ava').textContent = s.ava;
       }
     });
     $('#custom-back').addEventListener('click', () => { $('#custom').classList.add('hidden'); $('#mode-pick').classList.remove('hidden'); });
     $('#custom-start').addEventListener('click', () => {
       if (!S.seats.some((s) => s.type === 'human')) { toast('Нужен хотя бы один человек'); return; }
+      S.events = $('#opt-events').checked;
       startGame(S.seats.map((s) => Object.assign({}, s)), +$('#target').value || undefined);
     });
     document.addEventListener('click', (e) => {
@@ -204,23 +203,37 @@
     });
   }
 
-  // ======================== Игра ========================
+  // ======================== Контроллер человека ========================
   class HumanController {
     async takeTurn(g, pid) {
       await ensureViewer(pid);
-      S.selected = null; S.mode = null;
-      if (S.humans.length === 1) toast('Ваш ход!', null, 1400);
+      if (S.humans.length === 1) toast('Ваш ход! Перетаскивайте карты.', null, 1500);
       scheduleRender();
       return new Promise((res) => { S.endTurn = res; });
     }
     async respondOffer(g, pid, offer) {
       await ensureViewer(pid);
       const from = g.players[offer.from], me = g.players[pid];
-      const claim = offer.claim && offer.claim !== 'none' ? `<p>Заявка продавца: <span class="claim-badge">${C.CLAIMS[offer.claim].label}</span><br><small style="color:var(--muted)">Заявка может быть блефом!</small></p>` : '<p style="color:var(--muted)">Продавец ничего не сказал о карте.</p>';
       const m = openModal({
         title: `${from.avatar} ${esc(from.name)} предлагает сделку`,
-        html: `<div class="offer-card">${backHTML()}<div><p>Карта рубашкой вверх за <b class="money">$${offer.price}</b>.</p>${claim}<p>У вас: <b class="money">$${me.money}</b></p></div></div>`,
+        html: `<div class="offer-card">${backHTML()}<div><p>Карта рубашкой вверх за <b class="money">$${offer.price}</b>.</p>${claimHTML(offer.claim)}<p>У вас: <b class="money">$${me.money}</b></p></div></div>`,
         buttons: [{ label: 'Отказаться', value: false }, { label: `Купить за $${offer.price}`, cls: 'primary', value: true, disabled: me.money < offer.price }],
+      });
+      const r = await m.result;
+      await restoreViewer(g, pid);
+      return r;
+    }
+    async bidAuction(g, pid, auc) {
+      await ensureViewer(pid);
+      const from = g.players[auc.from], me = g.players[pid];
+      const st = { price: Math.min(2, me.money) };
+      const m = openModal({
+        title: `🔨 Аукцион вслепую: ${from.avatar} ${esc(from.name)}`,
+        html: `<div class="offer-card">${backHTML()}<div>${claimHTML(auc.claim)}
+          <p>Ставки закрытые: побеждает самая высокая. У вас <b class="money">$${me.money}</b>.</p>
+          ${stepperHTML(st.price)}</div></div>`,
+        buttons: [{ label: 'Пас', value: 0 }, { label: 'Сделать ставку', cls: 'primary', value: () => st.price }],
+        onMount(mm) { mountStepper(mm, st, () => me.money, 0); },
       });
       const r = await m.result;
       await restoreViewer(g, pid);
@@ -239,12 +252,27 @@
       await restoreViewer(g, pid);
       return r;
     }
+    async useLawyer(g, pid, info) {
+      await ensureViewer(pid);
+      const from = g.players[info.from], me = g.players[pid];
+      const n = g.tableCards(me).length;
+      const lawyer = me.hand.find((c) => c.type === 'lawyer');
+      const m = openModal({
+        title: `🏛 ${from.avatar} ${esc(from.name)} натравил налоговую!`,
+        html: `<div class="offer-card">${cardHTML(lawyer, { zoom: false })}<div><p>У вас есть <b>Юрист</b>. Отбить проверку?</p>
+          <p style="color:var(--muted)">${n ? `Без юриста проверяющий заберёт или сбросит одну из ${n} карт на вашем столе.` : `Ваш стол пуст — без юриста вы заплатите штраф $${Math.min(g.rules.taxFine, me.money)}.`}</p></div></div>`,
+        buttons: [{ label: 'Не тратить', value: false }, { label: '⚖️ Выставить юриста', cls: 'primary', value: true }],
+      });
+      const r = await m.result;
+      await restoreViewer(g, pid);
+      return r;
+    }
     async pickBlind(g, pid, targetId, n) {
       await ensureViewer(pid);
       const t = g.players[targetId];
       const m = openModal({
         title: `Вытяните карту у ${esc(t.name)}`,
-        html: `<p>${esc(t.name)} согласен. Выберите любую карту по рубашке:</p><div class="row-cards">${Array.from({ length: n }, (_, i) => backHTML({ k: i })).join('')}</div>`,
+        html: `<p>Сделка! Выберите любую карту по рубашке:</p><div class="row-cards">${Array.from({ length: n }, (_, i) => backHTML({ k: i })).join('')}</div>`,
         onMount(mm) { mm.el.addEventListener('click', (e) => { const c = e.target.closest('[data-k]'); if (c) mm.close(+c.dataset.k); }); },
       });
       return m.result;
@@ -258,7 +286,7 @@
       const me = g.players[pid];
       const chosen = new Set();
       const m = openModal({
-        title: 'Лимит руки — 7 карт',
+        title: `Лимит руки — ${g.rules.handLimit} карт`,
         html: `<p>Выберите <b>${n}</b> ${plural(n, 'карту', 'карты', 'карт')} для распродажи банку по $${g.rules.dumpPrice}.</p><div class="row-cards">${sortHand(me.hand).map((c) => cardHTML(c, { k: c.id, zoom: false })).join('')}</div>`,
         buttons: [{ label: 'Распродать', cls: 'primary', disabled: true, value: () => Array.from(chosen) }],
         onMount(mm) {
@@ -276,7 +304,11 @@
     }
   }
 
-  function plural(n, a, b, c) { const m10 = n % 10, m100 = n % 100; if (m10 === 1 && m100 !== 11) return a; if (m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20)) return b; return c; }
+  function claimHTML(claim) {
+    return claim && claim !== 'none'
+      ? `<p>Заявка продавца: <span class="claim-badge">${C.CLAIMS[claim].label}</span><br><small style="color:var(--muted)">Заявка может быть блефом!</small></p>`
+      : '<p style="color:var(--muted)">Продавец ничего не сказал о карте.</p>';
+  }
 
   async function ensureViewer(pid) {
     if (S.humans.length <= 1) { S.viewer = pid; return; }
@@ -291,7 +323,6 @@
     await m.result;
     S.curtainOpen = false;
     S.viewer = pid;
-    S.selected = null; S.mode = null;
     S.knownHand = new Set(p.hand.map((c) => c.id));
     renderNow();
   }
@@ -303,19 +334,16 @@
   function taxModal(g, pid, targetId) {
     const t = g.players[targetId];
     let pick = null;
-    const tableCards = [];
-    for (const ind of C.IND_ORDER) for (const s of C.STAGE_ORDER) { const c = t.table[ind][s]; if (c) tableCards.push({ c, ind, s }); }
-    if (!t.hand.length && !tableCards.length) {
-      return openModal({ title: 'Налоговая проверка', html: `<p>У ${esc(t.name)} нет ни одной карты.</p>`, buttons: [{ label: 'Закрыть', value: null }] }).result;
-    }
+    const cards = g.tableCards(t);
     const m = openModal({
       title: `🏛 Налоговая проверка: ${t.avatar} ${esc(t.name)}`,
       wide: true,
-      html: `<p>Вы видите все карты игрока. Выберите одну — заберите её себе или отправьте в сброс.</p>
-        <div class="section-label">Рука (${t.hand.length})</div>
-        <div class="row-cards">${t.hand.length ? sortHand(t.hand).map((c) => cardHTML(c, { k: 'h:' + c.id, zoom: false })).join('') : '<span style="color:var(--muted)">пусто</span>'}</div>
-        <div class="section-label">Стол (${tableCards.length})</div>
-        <div class="row-cards">${tableCards.length ? tableCards.map((x) => cardHTML(x.c, { k: `t:${x.ind}:${x.s}`, zoom: false })).join('') : '<span style="color:var(--muted)">пусто</span>'}</div>`,
+      html: `<p>Проверка стола. Выберите выложенную карту — заберите её себе или отправьте в сброс.</p>
+        ${C.IND_ORDER.map((ind) => {
+          const row = cards.filter((x) => x.ind === ind);
+          if (!row.length) return '';
+          return `<div class="section-label" style="color:${C.INDUSTRIES[ind].color}">${C.INDUSTRIES[ind].name}</div><div class="row-cards">${row.map((x) => cardHTML(x.card, { k: `${x.ind}:${x.stage}`, zoom: false })).join('')}</div>`;
+        }).join('')}`,
       buttons: [
         { label: 'Отправить в сброс', cls: 'danger', disabled: true, value: () => mk('discard') },
         { label: 'Забрать себе', cls: 'primary', disabled: true, value: () => mk('take') },
@@ -331,14 +359,11 @@
         });
       },
     });
-    function mk(mode) {
-      const parts = pick.split(':');
-      if (parts[0] === 'h') return { from: 'hand', cardId: +parts[1], mode };
-      return { from: 'table', ind: parts[1], stage: parts[2], mode };
-    }
+    function mk(mode) { const [ind, stage] = pick.split(':'); return { ind, stage, mode }; }
     return m.result;
   }
 
+  // ======================== Запуск партии ========================
   function startGame(seats, target) {
     if (S.game) S.game.aborted = true;
     $('#modal-root').innerHTML = '';
@@ -347,13 +372,12 @@
     const controllers = seats.map((s) => (s.type === 'human' ? new HumanController() : new AI.Bot(s.profile)));
     const g = new E.Game({
       players: seats.map((s) => ({ name: s.name, type: s.type, avatar: s.ava })),
-      controllers,
-      target,
+      controllers, target, events: S.events,
       delay: (ms) => (g.aborted ? new Promise(() => {}) : sleep(ms * S.speed)),
     });
     S.game = g;
     S.viewer = S.humans[0];
-    S.selected = null; S.mode = null; S.endTurn = null; S.busy = false;
+    S.endTurn = null; S.busy = false;
     S.knownHand = new Set(g.players[S.viewer].hand.map((c) => c.id));
     S.lastMoney = {};
     for (const p of g.players) S.lastMoney[p.id] = p.money;
@@ -366,31 +390,39 @@
     (async () => {
       if (S.humans.length > 1) { S.viewer = -1; await ensureViewer(S.humans[0]); }
       await g.run();
-    })().catch((e) => { if (!g.aborted) { console.error(e); toast('Ошибка: ' + e.message); } });
+    })().catch((e) => { if (!g.aborted) { console.error(e); toast('Ошибка: ' + esc(e.message)); } });
   }
 
   function onEvent(type, d) {
     const g = S.game;
     if (!g || g.aborted) return;
     const v = S.viewer;
+    const single = S.humans.length === 1;
     switch (type) {
       case 'log': appendLog(d); break;
+      case 'event': toast(`📰 Раунд ${d.round}: <span style="color:var(--gold)">${esc(d.event.title)}</span><br><small style="font-weight:600">${esc(d.event.text)}</small>`, d.event, 4200, true); break;
       case 'companySold': {
         const p = g.players[d.pid];
-        toast(`${p.avatar} ${esc(p.name)} продаёт компанию «${C.INDUSTRIES[d.ind].short}» за <span class="money">$${d.value}</span>${d.clean ? ' · Чистый бизнес!' : ''}`, CARD_BY_ID[Object.values(CARD_BY_ID).find((c) => c.type === 'sale').id], 3000);
+        toast(`${p.avatar} ${esc(p.name)} продаёт «${C.INDUSTRIES[d.ind].short}» за <span class="money">$${d.value}</span>${d.synergy ? ' · 🔗 связь' : ''}${d.clean ? ' · ✨ чистый бизнес' : ''}`, SALE_CARD, 3000);
         break;
       }
+      case 'dividend': if (d.pid === v) toast(`📈 Дивиденды по акции: <span class="money">+$${d.value}</span>`); break;
       case 'buyBlind': if (d.pid === v) toast(`Из колоды: «${esc(d.card.title)}»`, d.card, 2200); break;
       case 'requestResult':
         if (d.accepted && d.from === v) toast(`Вы вытянули «${esc(d.card.title)}»`, d.card);
-        if (d.accepted && d.to === v && S.humans.length === 1) toast(`У вас купили «${esc(d.card.title)}»`, d.card);
+        if (d.accepted && d.to === v && single) toast(`У вас купили «${esc(d.card.title)}»`, d.card);
         break;
-      case 'offerResult':
-        if (d.accepted && d.to === v) toast(`Вы купили «${esc(d.card.title)}»`, d.card);
+      case 'offerResult': if (d.accepted && d.to === v) toast(`Вы купили «${esc(d.card.title)}»`, d.card); break;
+      case 'auctionResult':
+        if (d.winner === v) toast(`🔨 Вы выиграли аукцион: «${esc(d.card.title)}»`, d.card);
+        else if (d.from === v) toast(d.winner != null ? `🔨 Карта ушла за <span class="money">$${d.price}</span>` : `🔨 Ставок нет — банк дал $${g.rules.auctionFloor}`);
         break;
+      case 'lawyer': if (d.from === v) toast('⚖️ Соперник выставил Юриста — проверка отменена'); break;
+      case 'invest': if (d.to === v && single) toast(`📈 ${esc(g.players[d.from].name)} купил акцию вашей компании «${C.INDUSTRIES[d.ind].short}» (+$${g.rules.sharePrice})`); break;
       case 'taxResult': {
         const f = g.players[d.from], t = g.players[d.to];
-        if (d.to === v && S.humans.length === 1) toast(`🏛 Налоговая (${esc(f.name)}) ${d.mode === 'take' ? 'изъяла' : 'сбросила'} у вас «${esc(d.card.title)}»`, d.card, 3200);
+        if (!d.card) { if (d.to === v && single) toast(`🏛 Стол пуст — штраф $${d.fine}`); break; }
+        if (d.to === v && single) toast(`🏛 Налоговая (${esc(f.name)}) ${d.mode === 'take' ? 'изъяла' : 'сбросила'} у вас «${esc(d.card.title)}»`, d.card, 3200);
         else if (d.from !== v) toast(`🏛 ${esc(f.name)} → ${esc(t.name)}: «${esc(d.card.title)}» ${d.mode === 'take' ? 'изъята' : 'в сброс'}`, d.card, 2600);
         break;
       }
@@ -405,6 +437,7 @@
     el.textContent = e.text;
     const log = $('#log');
     log.appendChild(el);
+    while (log.children.length > 250) log.firstChild.remove();
     log.scrollTop = log.scrollHeight;
   }
 
@@ -412,15 +445,15 @@
     const g = S.game;
     const w = d.winner;
     const isMe = S.humans.includes(w.id);
-    const rows = d.ranking.map((p, i) => `<tr class="${i === 0 ? 'first' : ''}"><td>${i + 1}</td><td>${p.avatar} ${esc(p.name)}</td><td class="money">$${p.money}</td><td>${p.companiesSold}</td><td>$${p.earned}</td></tr>`).join('');
+    const rows = d.ranking.map((p, i) => `<tr class="${i === 0 ? 'first' : ''}"><td>${i + 1}</td><td>${p.avatar} ${esc(p.name)}</td><td class="money">$${g.netWorth(p)}</td><td>${p.companiesSold}</td><td>$${p.dividends}</td></tr>`).join('');
     openModal({
       html: `<div class="win-ava">${isMe ? '🏆' : w.avatar}</div>
         <h2 class="win-title">${isMe && S.humans.length === 1 ? 'Вы победили!' : esc(w.name) + ' побеждает!'}</h2>
-        <p style="text-align:center">${esc(d.reason)} Раундов сыграно: ${g.round}.</p>
-        <table class="rank"><tr><th>#</th><th>Игрок</th><th>Капитал</th><th>Компаний продано</th><th>Заработано на продажах</th></tr>${rows}</table>`,
+        <p style="text-align:center">${esc(d.reason)} Раундов: ${g.round}.</p>
+        <table class="rank"><tr><th>#</th><th>Игрок</th><th>Капитал</th><th>Компаний</th><th>Дивиденды</th></tr>${rows}</table>`,
       buttons: [{ label: 'В меню', value: 'menu' }, { label: 'Сыграть ещё', cls: 'primary', value: 'again' }],
-    }).result.then((v) => {
-      if (v === 'again') startGame(S.seats.map((s) => Object.assign({}, s)), g.target);
+    }).result.then((val) => {
+      if (val === 'again') startGame(S.seats.map((s) => Object.assign({}, s)), g.target);
       else toMenu();
     });
   }
@@ -438,33 +471,45 @@
   // ======================== Действия игрока ========================
   function canAct() {
     const g = S.game;
-    return g && !g.over && g.phase === 'actions' && g.cur.type === 'human' && g.current === S.viewer && !S.busy && !S.curtainOpen && !!S.endTurn;
+    return !!(g && !g.over && g.phase === 'actions' && g.cur.type === 'human' && g.current === S.viewer && !S.busy && !S.curtainOpen && S.endTurn);
   }
   async function act(fn) {
     if (!canAct()) return;
     S.busy = true;
     try { await fn(); } catch (e) { toast('⚠️ ' + esc(e.message)); }
     S.busy = false;
-    const me = S.game && S.game.players[S.viewer];
-    if (me && S.selected != null && !me.hand.some((c) => c.id === S.selected)) { S.selected = null; S.mode = null; }
     renderNow();
   }
+  const me = () => S.game.players[S.viewer];
 
-  function completeCompanies(p) { return C.IND_ORDER.filter((ind) => S.game.isComplete(p, ind)); }
+  function stepperHTML(v) {
+    return `<div class="field"><label>Сумма:</label><div class="stepper"><button data-st="-1">−</button><span class="v">$${v}</span><button data-st="1">+</button></div></div>`;
+  }
+  function mountStepper(mm, state, max, min) {
+    min = min == null ? 1 : min;
+    mm.el.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-st]');
+      if (!b) return;
+      state.price = Math.max(min, Math.min(max(), state.price + +b.dataset.st));
+      $('.stepper .v', mm.el).textContent = '$' + state.price;
+    });
+  }
+  function claimSelectHTML() {
+    return `<div class="field"><label>Заявка:</label><select class="claim-sel">${Object.entries(C.CLAIMS).map(([k, c]) => `<option value="${k}">${c.label}</option>`).join('')}</select></div>`;
+  }
 
-  function chooseOpponent(title, filter, extra) {
+  function chooseOpponent(title, filter, sub) {
     const g = S.game;
-    const opps = g.opponents(S.viewer);
     let pick = null;
-    const m = openModal({
+    return openModal({
       title,
-      html: `<div class="choice-list">${opps.map((p) => {
+      html: `<div class="choice-list">${g.opponents(S.viewer).map((p) => {
         const ok = filter(p);
-        return `<div class="choice ${ok ? '' : 'disabled'}" data-p="${ok ? p.id : ''}" style="${ok ? '' : 'opacity:.4;cursor:not-allowed'}">
-          <span class="ava">${p.avatar}</span><div class="grow"><b>${esc(p.name)}</b><small>карт на руке: ${p.hand.length} · на столе: ${tableCount(p)}</small></div><span class="money">$${p.money}</span></div>`;
-      }).join('')}</div>${extra ? extra.html : ''}`,
+        return `<div class="choice" data-p="${ok ? p.id : ''}" style="${ok ? '' : 'opacity:.4;cursor:not-allowed'}">
+          <span class="ava">${p.avatar}</span><div class="grow"><b>${esc(p.name)}</b><small>${sub ? sub(p) : `на руке ${p.hand.length} · на столе ${g.tableCards(p).length}`}</small></div><span class="money">$${p.money}</span></div>`;
+      }).join('')}</div>`,
       dismiss: true, dismissValue: null,
-      buttons: [{ label: 'Отмена', value: null }, { label: extra ? extra.ok : 'Выбрать', cls: 'primary', disabled: true, value: () => ({ target: pick, m }) }],
+      buttons: [{ label: 'Отмена', value: null }, { label: 'Выбрать', cls: 'primary', disabled: true, value: () => pick }],
       onMount(mm) {
         mm.el.addEventListener('click', (e) => {
           const c = e.target.closest('.choice[data-p]');
@@ -474,82 +519,299 @@
           pick = +c.dataset.p;
           mm.btn(1).disabled = false;
         });
-        if (extra && extra.mount) extra.mount(mm);
       },
-    });
-    return m.result;
-  }
-  function tableCount(p) { let n = 0; for (const ind of C.IND_ORDER) for (const s of C.STAGE_ORDER) if (p.table[ind][s]) n++; return n; }
-
-  function stepperHTML(v) {
-    return `<div class="field"><label>Цена:</label><div class="stepper"><button data-st="-1">−</button><span class="v">$${v}</span><button data-st="1">+</button></div></div>`;
-  }
-  function mountStepper(mm, state, max) {
-    mm.el.addEventListener('click', (e) => {
-      const b = e.target.closest('[data-st]');
-      if (!b) return;
-      state.price = Math.max(1, Math.min(max(), state.price + +b.dataset.st));
-      $('.stepper .v', mm.el).textContent = '$' + state.price;
-    });
+    }).result;
   }
 
-  const handlers = {
-    build(card) {
-      if (card.type === 'wild') { S.mode = S.mode === 'wild' ? null : 'wild'; renderNow(); return; }
-      act(() => S.game.build(S.viewer, card.id));
+  // ---- конкретные действия (используются и перетаскиванием, и кнопками в увеличенной карте) ----
+  const A = {
+    build(card, stage) {
+      const p = me();
+      if (card.type === 'wild' && !stage) {
+        stage = C.STAGE_ORDER.find((s) => !p.table[card.ind][s]) || C.STAGE_ORDER.find((s) => p.table[card.ind][s].type === 'wild');
+        if (!stage) { toast('Все этапы уже настоящие — универсальная не нужна'); return; }
+      }
+      act(() => S.game.build(S.viewer, card.id, stage));
     },
-    sellBank(card) { act(() => S.game.sellBlind(S.viewer, card.id)); },
-    offer(card) {
+    sell(card, ind) {
+      const p = me();
+      ind = ind || C.IND_ORDER.find((i) => S.game.isComplete(p, i) && !S.game.companyValue(p, i).blocked);
+      if (!ind) { toast('Нет собранной компании (или на неё санкции)'); return; }
+      act(() => S.game.sellCompany(S.viewer, ind, card.id));
+    },
+    async auction(card) {
       if (!canAct()) return;
-      const st = { price: 3, claim: 'none' };
-      const claims = Object.entries(C.CLAIMS).map(([k, c]) => `<option value="${k}">${c.label}</option>`).join('');
-      chooseOpponent('Продать карту игроку в тёмную', (p) => p.money >= 1, {
-        ok: 'Предложить',
-        html: `<div class="offer-card" style="margin-top:12px">${cardHTML(card, { zoom: false })}<div style="flex:1">
-          ${stepperHTML(st.price)}
-          <div class="field"><label>Заявка:</label><select id="claim-sel">${claims}</select></div>
-          <p style="font-size:13px;color:var(--muted)">Покупатель увидит только рубашку и вашу заявку. Заявка может быть неправдой.</p></div></div>`,
-        mount(mm) { mountStepper(mm, st, () => S.game.rules.maxOfferPrice); },
-      }).then((r) => {
-        if (!r || r.target == null) return;
-        st.claim = $('#claim-sel', r.m.el) ? $('#claim-sel', r.m.el).value : st.claim;
-        act(() => S.game.offer(S.viewer, r.target, card.id, st.price, st.claim));
+      const m = openModal({
+        title: '🔨 Аукцион вслепую',
+        html: `<div class="offer-card">${cardHTML(card, { zoom: false })}<div style="flex:1">${claimSelectHTML()}
+          <p style="font-size:13px;color:var(--muted)">Соперники увидят только рубашку и заявку и сделают закрытые ставки. Нет ставок — банк заплатит $${S.game.rules.auctionFloor}.</p></div></div>`,
+        dismiss: true, dismissValue: null,
+        buttons: [{ label: 'Отмена', value: null }, { label: 'Выставить', cls: 'primary', value: (mm) => $('.claim-sel', mm.el).value }],
       });
+      const claim = await m.result;
+      if (claim != null) act(() => S.game.auction(S.viewer, card.id, claim));
     },
-    sale(card) {
-      const me = S.game.players[S.viewer];
-      const ready = completeCompanies(me);
-      if (!ready.length) { toast('Нет собранной компании: нужны все 4 этапа одной отрасли'); return; }
-      if (ready.length === 1) { act(() => S.game.sellCompany(S.viewer, ready[0], card.id)); return; }
-      S.mode = S.mode === 'sale' ? null : 'sale'; renderNow();
-    },
-    tax(card) {
+    async offer(card, targetId) {
       if (!canAct()) return;
-      chooseOpponent('Кого проверит налоговая?', () => true).then((r) => {
-        if (!r || r.target == null) return;
-        act(() => S.game.playTax(S.viewer, r.target, card.id));
+      if (targetId == null) targetId = await chooseOpponent('Кому предложить карту?', (p) => p.money >= 1);
+      if (targetId == null) return;
+      const t = S.game.players[targetId];
+      const st = { price: 3 };
+      const m = openModal({
+        title: `Предложить карту: ${t.avatar} ${esc(t.name)}`,
+        html: `<div class="offer-card">${cardHTML(card, { zoom: false })}<div style="flex:1">${stepperHTML(st.price)}${claimSelectHTML()}
+          <p style="font-size:13px;color:var(--muted)">У покупателя $${t.money}. Он увидит только рубашку и заявку.</p></div></div>`,
+        dismiss: true, dismissValue: null,
+        buttons: [{ label: 'Отмена', value: null }, { label: 'Предложить', cls: 'primary', value: (mm) => $('.claim-sel', mm.el).value }],
+        onMount(mm) { mountStepper(mm, st, () => S.game.rules.maxOfferPrice); },
       });
+      const claim = await m.result;
+      if (claim != null) act(() => S.game.offer(S.viewer, targetId, card.id, st.price, claim));
     },
-    zoom(card) { zoomCard(card); },
+    async tax(card, targetId) {
+      if (!canAct()) return;
+      if (targetId == null) targetId = await chooseOpponent('Кого проверит налоговая?', () => true, (p) => `на столе ${S.game.tableCards(p).length} карт`);
+      if (targetId == null) return;
+      act(() => S.game.playTax(S.viewer, targetId, card.id));
+    },
+    async share(card, targetId, ind) {
+      if (!canAct()) return;
+      const g = S.game;
+      const eligible = (q) => C.IND_ORDER.filter((i) => g.filled(q, i) >= 2 && !q.shares[i]);
+      if (targetId == null) targetId = await chooseOpponent('В чью компанию вложиться?', (q) => eligible(q).length > 0, (q) => eligible(q).map((i) => C.INDUSTRIES[i].short).join(', ') || 'нет подходящих компаний');
+      if (targetId == null) return;
+      const t = g.players[targetId];
+      if (!ind) {
+        const list = eligible(t);
+        if (!list.length) { toast('У этого игрока нет компании с 2+ этапами без акций'); return; }
+        if (list.length === 1) ind = list[0];
+        else {
+          ind = await openModal({
+            title: `Акция: компания ${esc(t.name)}`,
+            html: `<div class="choice-list">${list.map((i) => `<div class="choice" data-i="${i}"><span class="ava" style="color:${C.INDUSTRIES[i].color}">●</span><div class="grow"><b>${C.INDUSTRIES[i].name}</b><small>этапов ${g.filled(t, i)}/4 · сейчас $${g.companyValue(t, i).value}</small></div></div>`).join('')}</div>`,
+            dismiss: true, dismissValue: null, buttons: [{ label: 'Отмена', value: null }],
+            onMount(mm) { mm.el.addEventListener('click', (e) => { const c = e.target.closest('[data-i]'); if (c) mm.close(c.dataset.i); }); },
+          }).result;
+          if (!ind) return;
+        }
+      }
+      act(() => g.invest(S.viewer, targetId, ind, card.id));
+    },
+    buy() { act(() => S.game.buyBlind(S.viewer)); },
+    async request(targetId) {
+      if (!canAct()) return;
+      const g = S.game, p = me(), t = g.players[targetId];
+      const st = { price: Math.min(4, p.money) };
+      if (st.price < 1) { toast('Нет денег'); return; }
+      const m = openModal({
+        title: `Купить карту у ${t.avatar} ${esc(t.name)} в тёмную`,
+        html: `<p>Назовите цену. Если ${esc(t.name)} согласится, вы вытянете любую из ${t.hand.length} карт по рубашке.</p>${stepperHTML(st.price)}`,
+        dismiss: true, dismissValue: null,
+        buttons: [{ label: 'Отмена', value: null }, { label: 'Предложить', cls: 'primary', value: true }],
+        onMount(mm) { mountStepper(mm, st, () => Math.min(g.rules.maxOfferPrice, p.money)); },
+      });
+      if (await m.result) act(() => g.requestBuy(S.viewer, targetId, st.price));
+    },
   };
 
-  function requestFlow() {
-    if (!canAct()) return;
-    const g = S.game, me = g.players[S.viewer];
-    const st = { price: Math.min(4, me.money) };
-    if (st.price < 1) { toast('Нет денег'); return; }
-    chooseOpponent('Купить карту у игрока в тёмную', (p) => p.hand.length > 0, {
-      ok: 'Предложить цену',
-      html: `<div style="margin-top:10px">${stepperHTML(st.price)}<p style="font-size:13px;color:var(--muted)">Если продавец согласится, вы вытянете любую карту из его руки по рубашке.</p></div>`,
-      mount(mm) { mountStepper(mm, st, () => Math.min(g.rules.maxOfferPrice, me.money)); },
-    }).then((r) => {
-      if (!r || r.target == null) return;
-      act(() => g.requestBuy(S.viewer, r.target, st.price));
-    });
+  // ======================== Перетаскивание ========================
+  const D = { src: null, payload: null, ghost: null, x0: 0, y0: 0, dx: 0, dy: 0, moved: false, hover: null };
+
+  function payloadOf(el) {
+    const g = S.game;
+    if (!g) return null;
+    const kind = el.dataset.drag;
+    if (kind === 'hand') return { kind: 'card', card: me().hand.find((c) => c.id === +el.dataset.cid) };
+    if (kind === 'deck') return { kind: 'deck' };
+    if (kind === 'opphand') return { kind: 'opphand', pid: +el.dataset.pid };
+    return null;
   }
 
+  /** Принимает ли цель (элемент с data-drop) этот груз. Возвращает текст-подсказку или false. */
+  function accepts(pl, el) {
+    const g = S.game, p = me();
+    const t = el.dataset.drop;
+    const acts = g.actionsLeft > 0;
+    if (pl.kind === 'deck') return t === 'hand' && acts && p.money >= g.buyPrice && g.canDraw();
+    if (pl.kind === 'opphand') return t === 'hand' && acts && p.money >= 1 && g.players[pl.pid].hand.length > 0;
+    const c = pl.card;
+    if (!c) return false;
+    const ind = el.dataset.ind;
+    switch (t) {
+      case 'slot':
+        if (c.type === 'stage') return c.ind === ind && c.stage === el.dataset.stage;
+        if (c.type === 'wild') return c.ind === ind;
+        return false;
+      case 'company':
+        if (c.type === 'stage' || c.type === 'wild') return c.ind === ind;
+        if (c.type === 'sale') return g.isComplete(p, ind) && !g.companyValue(p, ind).blocked;
+        return false;
+      case 'oppco': {
+        const q = g.players[+el.dataset.pid];
+        return c.type === 'share' && acts && g.filled(q, ind) >= 2 && !q.shares[ind] && p.money >= g.rules.sharePrice;
+      }
+      case 'player': {
+        if (!acts) return false;
+        const q = g.players[+el.dataset.pid];
+        if (c.type === 'tax') return !g.ev('taxfree');
+        if (c.type === 'share') return C.IND_ORDER.some((i) => g.filled(q, i) >= 2 && !q.shares[i]) && p.money >= g.rules.sharePrice;
+        return q.money >= 1;
+      }
+      case 'auction': return acts;
+      default: return false;
+    }
+  }
+
+  function perform(pl, el) {
+    const t = el.dataset.drop;
+    if (pl.kind === 'deck') return A.buy();
+    if (pl.kind === 'opphand') return A.request(pl.pid);
+    const c = pl.card;
+    if (t === 'slot') return A.build(c, el.dataset.stage);
+    if (t === 'company') return c.type === 'sale' ? A.sell(c, el.dataset.ind) : A.build(c, c.type === 'wild' ? null : c.stage);
+    if (t === 'oppco') return A.share(c, +el.dataset.pid, el.dataset.ind);
+    if (t === 'player') {
+      const pid = +el.dataset.pid;
+      if (c.type === 'tax') return A.tax(c, pid);
+      if (c.type === 'share') return A.share(c, pid);
+      return A.offer(c, pid);
+    }
+    if (t === 'auction') return A.auction(c);
+  }
+
+  function dropTargetAt(x, y) {
+    let el = document.elementFromPoint(x, y);
+    while (el && el !== document.body) {
+      if (el.dataset && el.dataset.drop && accepts(D.payload, el)) return el;
+      el = el.parentElement;
+    }
+    return null;
+  }
+
+  function startDrag(e) {
+    D.payload = payloadOf(D.src);
+    if (!D.payload || (D.payload.kind === 'card' && !D.payload.card)) return false;
+    if (!canAct()) {
+      const g = S.game;
+      toast(g && g.cur.id !== S.viewer ? 'Сейчас ходит другой игрок' : 'Подождите…', null, 1200);
+      return false;
+    }
+    const r = D.src.getBoundingClientRect();
+    const ghost = (D.payload.kind === 'card' ? D.src : (D.payload.kind === 'deck' ? $('#deck .card:last-child') : D.src.querySelector('.card')) || D.src).cloneNode(true);
+    ghost.classList.add('drag-ghost');
+    ghost.classList.remove('new');
+    const w = D.payload.kind === 'card' ? r.width : Math.max(60, Math.min(90, r.width));
+    ghost.style.width = w + 'px';
+    ghost.style.setProperty('--w', w + 'px');
+    D.dx = D.payload.kind === 'card' ? D.x0 - r.left : w / 2;
+    D.dy = D.payload.kind === 'card' ? D.y0 - r.top : w * 0.7;
+    document.body.appendChild(ghost);
+    D.ghost = ghost;
+    if (D.payload.kind === 'card') D.src.classList.add('dragging');
+    document.body.classList.add('dragging');
+    for (const el of $$('[data-drop]')) if (accepts(D.payload, el)) el.classList.add('drop-ok');
+    return true;
+  }
+  function moveGhost(x, y) {
+    if (!D.ghost) return;
+    D.ghost.style.left = (x - D.dx) + 'px';
+    D.ghost.style.top = (y - D.dy) + 'px';
+    const t = dropTargetAt(x, y);
+    if (t !== D.hover) {
+      if (D.hover) D.hover.classList.remove('drop-hover');
+      D.hover = t;
+      if (t) t.classList.add('drop-hover');
+    }
+  }
+  function endDrag() {
+    if (D.ghost) D.ghost.remove();
+    if (D.src) D.src.classList.remove('dragging');
+    $$('.drop-ok').forEach((x) => x.classList.remove('drop-ok'));
+    $$('.drop-hover').forEach((x) => x.classList.remove('drop-hover'));
+    document.body.classList.remove('dragging');
+    D.src = null; D.ghost = null; D.payload = null; D.hover = null; D.moved = false;
+  }
+
+  function initDrag() {
+    document.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0 || D.src) return;
+      const el = e.target.closest('#game [data-drag]');
+      if (!el) return;
+      D.src = el; D.x0 = e.clientX; D.y0 = e.clientY; D.moved = false;
+      e.preventDefault();
+    });
+    document.addEventListener('pointermove', (e) => {
+      if (!D.src) return;
+      if (!D.moved) {
+        if (Math.hypot(e.clientX - D.x0, e.clientY - D.y0) < 7) return;
+        D.moved = true;
+        if (!startDrag(e)) { D.src = null; D.moved = false; return; }
+      }
+      moveGhost(e.clientX, e.clientY);
+    });
+    document.addEventListener('pointerup', (e) => {
+      if (!D.src) return;
+      const src = D.src;
+      if (D.moved && D.payload) {
+        const target = dropTargetAt(e.clientX, e.clientY);
+        const pl = D.payload;
+        endDrag();
+        if (target) perform(pl, target);
+        return;
+      }
+      endDrag();
+      tap(src);
+    });
+    document.addEventListener('pointercancel', endDrag);
+  }
+
+  function tap(el) {
+    const g = S.game;
+    if (!g) return;
+    if (el.dataset.drag === 'hand') {
+      const card = me().hand.find((c) => c.id === +el.dataset.cid);
+      if (card) zoomHand(card);
+    } else if (el.dataset.drag === 'deck') {
+      toast('Перетащите колоду в свою руку, чтобы купить карту за $' + g.buyPrice, null, 2000);
+    } else if (el.dataset.drag === 'opphand') {
+      toast('Перетащите карты соперника в свою руку, чтобы купить одну вслепую', null, 2200);
+    }
+  }
+
+  // ======================== Увеличенная карта ========================
+  function zoomCard(card, extraHTML) {
+    openModal({ html: `<div class="zoom">${cardHTML(card, { zoom: false })}${extraHTML || ''}</div>`, dismiss: true, buttons: [{ label: 'Закрыть', value: null }] });
+  }
+  function zoomHand(card) {
+    const g = S.game, p = me(), ok = canAct(), acts = ok && g.actionsLeft > 0;
+    const btns = [];
+    const add = (label, fn, enabled, cls) => btns.push({ label, fn, enabled, cls });
+    if (card.type === 'stage') add('Построить', () => A.build(card), ok, 'primary');
+    if (card.type === 'wild') add('Построить', () => A.build(card), ok, 'primary');
+    if (card.type === 'sale') add('Продать компанию', () => A.sell(card), ok && C.IND_ORDER.some((i) => g.isComplete(p, i)), 'primary');
+    if (card.type === 'tax') add('Налоговая проверка', () => A.tax(card), acts && !g.ev('taxfree'), 'primary');
+    if (card.type === 'share') add('Купить акцию', () => A.share(card), acts && p.money >= g.rules.sharePrice, 'primary');
+    add('🔨 На аукцион', () => A.auction(card), acts);
+    add('Предложить игроку', () => A.offer(card), acts);
+    const hint = card.type === 'lawyer' ? '<p style="font-size:13px;color:var(--muted)">Юрист играется сам: когда на вас натравят налоговую, игра предложит его выставить.</p>'
+      : '<p style="font-size:12px;color:var(--muted)">Подсказка: карты можно просто перетаскивать.</p>';
+    const m = openModal({
+      html: `<div class="zoom">${cardHTML(card, { zoom: false })}<div class="acts">${btns.map((b, i) => `<button class="btn small ${b.cls || ''}" data-a="${i}" ${b.enabled ? '' : 'disabled'}>${b.label}</button>`).join('')}</div>${hint}</div>`,
+      dismiss: true, buttons: [{ label: 'Закрыть', value: null }],
+      onMount(mm) { mm.el.addEventListener('click', (e) => { const b = e.target.closest('[data-a]'); if (b && !b.disabled) { mm.close(); btns[+b.dataset.a].fn(); } }); },
+    });
+    return m;
+  }
+  function breakdownHTML(p, ind) {
+    const cv = S.game.companyValue(p, ind);
+    return `<div class="breakdown">${cv.parts.map((x) => `<span>${esc(x.label)}</span><b>${x.v >= 0 ? '+' : '−'}$${Math.abs(x.v)}</b>`).join('')}<span>Итого</span><b style="color:var(--gold)">$${cv.value}</b></div>${cv.blocked ? '<p style="color:#ffb3b3">Санкции: в этом раунде не продаётся</p>' : ''}`;
+  }
+
+  // ======================== Прочие события интерфейса ========================
   function initGameEvents() {
     $('#speed').addEventListener('change', (e) => { S.speed = +e.target.value; });
+    $('#log-btn').addEventListener('click', () => $('#sidebar').classList.toggle('open'));
+    $('#log-close').addEventListener('click', () => $('#sidebar').classList.remove('open'));
     $('#to-menu').addEventListener('click', () => {
       openModal({ title: 'Выйти в меню?', html: '<p>Текущая партия будет потеряна.</p>', dismiss: true, buttons: [{ label: 'Остаться', value: false }, { label: 'Выйти', cls: 'danger', value: true }] })
         .result.then((v) => { if (v) toMenu(); });
@@ -557,45 +819,27 @@
     $('#game').addEventListener('click', (e) => {
       const g = S.game;
       if (!g) return;
-      const me = g.players[S.viewer];
-      // кнопки панели
       const a = e.target.closest('[data-act]');
       if (a) {
         const k = a.dataset.act;
-        if (k === 'buy') act(() => g.buyBlind(S.viewer));
-        else if (k === 'request') requestFlow();
-        else if (k === 'end') { if (canAct()) { const f = S.endTurn; S.endTurn = null; S.selected = null; S.mode = null; renderNow(); f(); } }
-        else if (k === 'cancel') { S.mode = null; renderNow(); }
-        else {
-          const card = me.hand.find((c) => c.id === S.selected);
-          if (card && handlers[k]) handlers[k](card);
-        }
+        if (k === 'end' && canAct()) { const f = S.endTurn; S.endTurn = null; renderNow(); f(); }
+        if (k === 'loan') act(() => g.takeLoan(S.viewer));
+        if (k === 'repay') act(() => g.repayLoan(S.viewer));
         return;
       }
-      // слот для универсальной карты
-      const slot = e.target.closest('.slot.targetable');
-      if (slot && S.mode === 'wild') { const id = S.selected; act(() => g.build(S.viewer, id, slot.dataset.slot)); S.mode = null; return; }
-      const co = e.target.closest('.company.targetable');
-      if (co && S.mode === 'sale') { const id = S.selected; S.mode = null; act(() => g.sellCompany(S.viewer, co.dataset.ind, id)); return; }
-      // клик по карте руки
-      const hc = e.target.closest('#hand .card[data-cid]');
-      if (hc) {
-        const id = +hc.dataset.cid;
-        S.selected = S.selected === id ? null : id;
-        S.mode = null;
-        renderNow();
-        return;
-      }
-      if (e.target.closest('#deck') && canAct()) { act(() => g.buyBlind(S.viewer)); return; }
+      if (e.target.closest('[data-drag]')) return; // тапы по перетаскиваемым — в pointerup
       const z = e.target.closest('[data-zoom]');
-      if (z) { zoomCard(CARD_BY_ID[+z.dataset.zoom]); }
+      if (z) {
+        const card = CARD_BY_ID[+z.dataset.zoom];
+        const co = z.closest('.company');
+        const extra = co ? breakdownHTML(me(), co.dataset.ind) : (card.type === 'event' ? `<p>${esc(card.text)}</p>` : '');
+        zoomCard(card, extra);
+        return;
+      }
+      const head = e.target.closest('.co-head');
+      if (head) { const co = head.closest('.company'); openModal({ title: C.INDUSTRIES[co.dataset.ind].name, html: `<div class="zoom">${breakdownHTML(me(), co.dataset.ind)}<p style="font-size:13px;color:var(--muted)">Связь отраслей: ${C.SUPPLIER[co.dataset.ind].why} — нужно 2+ этапа «${C.INDUSTRIES[C.SUPPLIER[co.dataset.ind].from].short}» на столе.</p></div>`, dismiss: true, buttons: [{ label: 'Ок' }] }); }
     });
-    $('#game').addEventListener('dblclick', (e) => {
-      const hc = e.target.closest('#hand .card[data-cid]');
-      if (!hc || !S.game) return;
-      const card = S.game.players[S.viewer].hand.find((c) => c.id === +hc.dataset.cid);
-      if (card && card.type === 'stage') { S.selected = null; act(() => S.game.build(S.viewer, card.id)); }
-    });
+    window.addEventListener('resize', scheduleRender);
   }
 
   // ======================== Отрисовка ========================
@@ -609,129 +853,132 @@
     const g = S.game;
     if (!g) return;
     const v = S.viewer >= 0 ? S.viewer : S.humans[0];
-    const me = g.players[v];
-    $('#round-v').textContent = g.round;
+    const p = g.players[v];
+    const my = canAct();
+    const acts = g.current === v ? g.actionsLeft : 0;
+    $('#round-v').textContent = g.round || 1;
 
-    // соперники
+    // ---- соперники ----
     const order = [];
     for (let k = 1; k < g.players.length; k++) order.push(g.players[(v + k) % g.players.length]);
-    $('#opponents').innerHTML = order.map((p) => {
-      const backs = Array.from({ length: Math.min(p.hand.length, 9) }, () => backHTML()).join('');
-      const rows = C.IND_ORDER.map((ind) => `<div class="mini-row ${g.isComplete(p, ind) ? 'complete' : ''}" style="--ind:${C.INDUSTRIES[ind].color}">${C.STAGE_ORDER.map((s) => {
-        const c = p.table[ind][s];
-        return `<div class="mini-slot">${c ? cardHTML(c) : ''}</div>`;
-      }).join('')}</div>`).join('');
-      return `<div class="opp ${g.current === p.id && !g.over ? 'active' : ''}" data-pid="${p.id}">
-        <div class="opp-head"><span class="ava">${p.avatar}</span><span class="nm">${esc(p.name)}</span><span class="money" data-money="${p.id}">$${p.money}</span></div>
-        <div class="opp-sub"><div class="opp-hand">${backs}<span class="cnt">${p.hand.length} ${plural(p.hand.length, 'карта', 'карты', 'карт')}</span></div>
-        <div class="opp-stats">продано: ${p.companiesSold}${p.type === 'bot' ? '<br>бот' : ''}</div></div>
+    $('#opponents').innerHTML = order.map((q) => {
+      const backs = Array.from({ length: Math.min(q.hand.length, 7) }, () => backHTML()).join('');
+      const rows = C.IND_ORDER.map((ind) => {
+        const sh = q.shares[ind];
+        return `<div class="mini-row ${g.isComplete(q, ind) ? 'complete' : ''}" data-drop="oppco" data-pid="${q.id}" data-ind="${ind}" style="--ind:${C.INDUSTRIES[ind].color}" title="${C.INDUSTRIES[ind].name}: $${g.companyValue(q, ind).value}">
+          ${sh ? `<span class="share-tag" title="Акция: ${esc(g.players[sh.pid].name)}">📈${g.players[sh.pid].avatar}</span>` : ''}
+          ${C.STAGE_ORDER.map((s) => { const c = q.table[ind][s]; return `<div class="mini-slot">${c ? cardHTML(c) : ''}</div>`; }).join('')}</div>`;
+      }).join('');
+      return `<div class="opp ${g.current === q.id && !g.over ? 'active' : ''}" data-drop="player" data-pid="${q.id}">
+        <div class="opp-head"><span class="ava">${q.avatar}</span><span class="nm">${esc(q.name)}</span>
+          ${q.loan ? `<span class="badge loan" title="Кредит">🏦 −$${q.loan.owe}</span>` : ''}
+          ${q.companiesSold ? `<span class="badge" title="Продано компаний">💼${q.companiesSold}</span>` : ''}
+          <div class="opp-hand" data-drag="opphand" data-pid="${q.id}" title="Перетащите в свою руку, чтобы купить карту вслепую">${backs}<span class="cnt">${q.hand.length}</span></div>
+          <span class="money" data-money="${q.id}">$${q.money}</span></div>
         <div class="mini-table">${rows}</div></div>`;
     }).join('');
 
-    // колода и сброс
+    // ---- центр ----
     const dn = g.deck.length;
     $('#deck').innerHTML = dn ? Array.from({ length: Math.min(3, dn) }, () => backHTML()).join('') : '';
     $('#deck').classList.toggle('empty', !dn);
-    $('#deck').style.cursor = canAct() ? 'pointer' : '';
-    $('#deck-label').textContent = `Колода · ${dn}`;
+    $('#deck-label').textContent = `Колода · ${dn} · $${g.buyPrice}`;
     const top = g.discard[g.discard.length - 1];
     $('#discard').innerHTML = top ? cardHTML(top) : '';
     $('#discard').classList.toggle('empty', !top);
     $('#discard-label').textContent = `Сброс · ${g.discard.length}`;
+    $('#event').innerHTML = g.event ? cardHTML(g.event) : (g.useEvents ? backHTML({ img: C.EVENT_BACK_IMG }) : '');
+    $('#event').classList.toggle('empty', !g.useEvents);
+    $('#event').parentElement.classList.toggle('hidden', !g.useEvents);
 
-    // статус
+    const loan = p.loan;
+    const cheap = g.ev('cheapcredit');
+    $('#bank').innerHTML = `<span class="z-ico">🏦</span>${loan
+      ? `<div class="loan-info">Долг $${loan.owe}<br>${loan.turnsLeft} ${plural(loan.turnsLeft, 'ход', 'хода', 'ходов')}</div><button class="btn" data-act="repay" ${my && p.money >= loan.owe ? '' : 'disabled'}>Погасить</button>`
+      : `<button class="btn" data-act="loan" ${my ? '' : 'disabled'} title="Взять $${g.rules.loanAmount}, вернуть $${cheap ? g.rules.loanAmount : g.rules.loanRepay} через ${g.rules.loanTurns} хода">Кредит +$${g.rules.loanAmount}</button><small>вернуть $${cheap ? g.rules.loanAmount : g.rules.loanRepay}</small>`}`;
+
     const cur = g.cur;
     let who, hint;
     if (g.over) { who = 'Игра окончена'; hint = `Победитель — ${esc(g.winner.name)}`; }
-    else if (g.phase === 'waiting') { who = `${cur.avatar} Ход: ${esc(cur.name)}`; hint = 'Ожидание ответа на сделку…'; }
-    else if (cur.id === v && cur.type === 'human') {
-      who = S.humans.length > 1 ? `${cur.avatar} Ход: ${esc(cur.name)}` : '🟢 Ваш ход';
-      hint = contextHint(me);
-    } else { who = `${cur.avatar} Ходит ${esc(cur.name)}…`; hint = cur.type === 'bot' ? 'Бот думает и торгует. Следите за журналом.' : 'Ждём другого игрока.'; }
-    $('#status').innerHTML = `<div class="who">${who}</div><div class="hint">${hint}</div>`;
+    else if (g.phase === 'waiting') { who = `${cur.avatar} ${esc(cur.name)}`; hint = 'Ожидание ответа…'; }
+    else if (cur.id === v && cur.type === 'human') { who = S.humans.length > 1 ? `${cur.avatar} ${esc(cur.name)}` : '🟢 Ваш ход'; hint = contextHint(p); }
+    else { who = `${cur.avatar} Ходит ${esc(cur.name)}…`; hint = 'Следите за журналом и тостами.'; }
+    $('#status').innerHTML = `<div class="who">${who}</div><div class="hint">${hint}</div>${g.event ? `<div class="ev">📰 ${esc(g.event.title)}: ${esc(g.event.text)}</div>` : ''}`;
 
-    // моя панель
-    const my = canAct();
-    const actions = g.current === v ? g.actionsLeft : 0;
-    $('#me').classList.toggle('active', my);
-    const pct = Math.min(100, Math.round(100 * me.money / g.target));
+    // ---- моя панель ----
+    const nw = g.netWorth(p);
+    const pct = Math.max(0, Math.min(100, Math.round(100 * nw / g.target)));
     $('#me-bar').innerHTML = `
-      <div class="me-name"><span class="ava">${me.avatar}</span>${esc(me.name)}</div>
-      <div class="money me-money" data-money="${me.id}">$${me.money}</div>
-      <div class="progress-wrap"><div class="progress"><div style="width:${pct}%"></div></div><span>до цели $${g.target}: ещё $${Math.max(0, g.target - me.money)}</span></div>
-      <div class="pips" title="Сделки на этот ход">${Array.from({ length: g.rules.actionsPerTurn }, (_, i) => `<span class="pip ${i < actions ? '' : 'used'}"></span>`).join('')}<span>сделки</span></div>
-      <div class="me-buttons">
-        <button class="btn" data-act="buy" ${my && actions > 0 && me.money >= g.rules.buyPrice && g.canDraw() ? '' : 'disabled'}>🂠 Купить у банка · $${g.rules.buyPrice}</button>
-        <button class="btn" data-act="request" ${my && actions > 0 && me.money >= 1 ? '' : 'disabled'}>🤝 Купить у игрока</button>
-        <button class="btn primary" data-act="end" ${my ? '' : 'disabled'}>Завершить ход ➜</button>
-      </div>`;
+      <div class="me-name"><span class="ava">${p.avatar}</span><span class="nm">${esc(p.name)}</span></div>
+      <div class="money me-money" data-money="${p.id}">$${p.money}</div>
+      <div class="progress-wrap"><div class="progress"><div style="width:${pct}%"></div></div><span>до цели $${g.target}: ещё $${Math.max(0, g.target - nw)}${p.loan ? ' (с учётом долга)' : ''}</span></div>
+      <div class="pips" title="Сделки на этот ход">${Array.from({ length: g.rules.actionsPerTurn }, (_, i) => `<span class="pip ${i < acts ? '' : 'used'}"></span>`).join('')}<span>сделки</span></div>
+      <button class="btn primary end-btn" data-act="end" ${my ? '' : 'disabled'}>Завершить ход ➜</button>`;
 
-    // компании
-    const selCard = me.hand.find((c) => c.id === S.selected);
+    // ---- компании ----
     $('#companies').innerHTML = C.IND_ORDER.map((ind) => {
       const info = C.INDUSTRIES[ind];
-      const n = g.filled(me, ind);
-      const val = g.companyValue(me, ind);
-      const complete = n === 4;
-      const saleT = S.mode === 'sale' && complete;
-      return `<div class="company ${complete ? 'complete' : ''} ${saleT ? 'targetable' : ''}" data-ind="${ind}" style="--ind:${info.color}">
-        <div class="co-head"><span class="dot"></span>${info.short}<span class="val">${n}/4 · ${complete ? 'продажа' : 'сейчас'} <b>$${val.value}</b>${val.clean ? ' ✨' : ''}</span></div>
+      const n = g.filled(p, ind);
+      const cv = g.companyValue(p, ind);
+      const sh = p.shares[ind];
+      const tags = [];
+      if (cv.synergy) tags.push(`<span class="tag syn" title="${C.SUPPLIER[ind].why}">🔗 +$${g.rules.synergyBonus}</span>`);
+      if (cv.clean) tags.push('<span class="tag">✨</span>');
+      if (sh) tags.push(`<span class="tag sh" title="Акционер получит треть">📈 ${g.players[sh.pid].avatar}</span>`);
+      if (cv.blocked) tags.push('<span class="tag block">⛔ санкции</span>');
+      else if (g.event && (g.ev('gov', ind) || g.ev('crisis') || g.ev('boom'))) tags.push(`<span class="tag ev">📰</span>`);
+      return `<div class="company ${n === 4 ? 'complete' : ''}" data-drop="company" data-ind="${ind}" style="--ind:${info.color}">
+        <div class="co-head"><span class="dot"></span><span class="nm">${info.short}</span><span class="tags">${tags.join('')}</span><span class="val">${n}/4 · <b>$${cv.value}</b></span></div>
         <div class="slots">${C.STAGE_ORDER.map((s) => {
-          const c = me.table[ind][s];
-          const wildT = S.mode === 'wild' && selCard && selCard.type === 'wild' && selCard.ind === ind;
-          return `<div class="slot ${wildT ? 'targetable' : ''}" data-slot="${s}" data-ind="${ind}">${c ? cardHTML(c, { zoom: !wildT }) : C.STAGES[s]}</div>`;
+          const c = p.table[ind][s];
+          return `<div class="slot" data-drop="slot" data-ind="${ind}" data-stage="${s}">${c ? cardHTML(c) : C.STAGES[s]}</div>`;
         }).join('')}</div></div>`;
     }).join('');
 
-    // рука
-    const hand = sortHand(me.hand);
-    $('#hand').innerHTML = hand.length ? hand.map((c) => cardHTML(c, { cid: c.id, zoom: false, cls: (c.id === S.selected ? 'sel ' : '') + (S.knownHand.has(c.id) ? '' : 'new') })).join('') : '<div class="empty-hand">На руке нет карт</div>';
-    S.knownHand = new Set(me.hand.map((c) => c.id));
-
-    // действия выбранной карты
-    $('#sel-actions').innerHTML = selCard ? selActionsHTML(selCard, me, my, actions) : '';
+    // ---- рука ----
+    const hand = sortHand(p.hand);
+    const zone = $('#hand-zone');
+    const hw = zone.clientWidth || 600;
+    // размер карты: по CSS, но не выше свободной высоты зоны руки
+    $('#hand').style.removeProperty('--w');
+    const probe = zone.querySelector('#hand .card');
+    let cardW = probe ? probe.getBoundingClientRect().width : 100;
+    const maxW = Math.floor((zone.clientHeight - 12) / 1.45);
+    if (maxW > 30 && cardW > maxW) { cardW = maxW; $('#hand').style.setProperty('--w', maxW + 'px'); }
+    const need = hand.length * (cardW + 8);
+    const overlap = need > hw ? Math.ceil((need - hw) / (hand.length * 2)) + 4 : -4;
+    $('#hand').style.setProperty('--overlap', overlap + 'px');
+    $('#hand').innerHTML = hand.length
+      ? hand.map((c) => cardHTML(c, { cid: c.id, zoom: false, drag: 'hand', cls: S.knownHand.has(c.id) ? '' : 'new' })).join('')
+      : '<div class="empty-hand">На руке нет карт</div>';
+    S.knownHand = new Set(p.hand.map((c) => c.id));
 
     // всплывающие деньги
-    for (const p of g.players) {
-      const prev = S.lastMoney[p.id];
-      if (prev != null && prev !== p.money) floatMoney($(`[data-money="${p.id}"]`), p.money - prev);
-      S.lastMoney[p.id] = p.money;
+    for (const q of g.players) {
+      const prev = S.lastMoney[q.id];
+      if (prev != null && prev !== q.money) floatMoney($(`[data-money="${q.id}"]`), q.money - prev);
+      S.lastMoney[q.id] = q.money;
     }
   }
 
-  function selActionsHTML(card, me, my, actions) {
+  function contextHint(p) {
     const g = S.game;
-    const b = (act, label, ok, cls) => `<button class="btn small ${cls || ''}" data-act="${act}" ${ok ? '' : 'disabled'}>${label}</button>`;
-    const out = [`<span class="title">${esc(card.title)}</span>`];
-    if (S.mode === 'wild') return `<span class="title">Выберите место в компании «${C.INDUSTRIES[card.ind].short}»</span>` + b('cancel', 'Отмена', true, 'ghost');
-    if (S.mode === 'sale') return '<span class="title">Выберите собранную компанию для продажи</span>' + b('cancel', 'Отмена', true, 'ghost');
-    if (card.type === 'stage') {
-      const cur = me.table[card.ind][card.stage];
-      out.push(b('build', cur ? `Построить (заменить «${esc(cur.title)}»)` : 'Построить', my, 'primary'));
+    const hasSale = p.hand.some((c) => c.type === 'sale');
+    const ready = C.IND_ORDER.filter((i) => g.isComplete(p, i));
+    if (ready.length && hasSale) {
+      if (ready.every((i) => g.companyValue(p, i).blocked)) return '⛔ Компания собрана, но на отрасль санкции — ждите следующего раунда.';
+      return '💰 Перетащите «Продажу» на собранную компанию!';
     }
-    if (card.type === 'wild') out.push(b('build', 'Построить…', my, 'primary'));
-    if (card.type === 'sale') out.push(b('sale', 'Продать компанию', my && completeCompanies(me).length > 0, 'primary'));
-    if (card.type === 'tax') out.push(b('tax', 'Налоговая проверка', my && actions > 0, 'primary'));
-    out.push(b('sellBank', `Продать банку · +$${g.rules.sellPrice}`, my && actions > 0));
-    out.push(b('offer', 'Предложить игроку', my && actions > 0));
-    out.push(b('zoom', '🔍', true, 'ghost'));
-    return out.join('');
-  }
-
-  function contextHint(me) {
-    const g = S.game;
-    const hasSale = me.hand.some((c) => c.type === 'sale');
-    const ready = completeCompanies(me);
-    if (ready.length && hasSale) return '💰 Компания собрана и есть «Продажа» — выберите карту «Продажа» и продайте!';
-    if (ready.length) return 'Компания собрана — нужна карта «Продажа». Купите в тёмную или проверьте соперника налоговой.';
-    const buildable = me.hand.filter((c) => c.type === 'stage' && (!me.table[c.ind][c.stage] || me.table[c.ind][c.stage].type === 'wild' || c.tier > me.table[c.ind][c.stage].tier));
-    if (buildable.length) return `Можно построить ${buildable.length} ${plural(buildable.length, 'этап', 'этапа', 'этапов')} (двойной клик по карте). Стройка бесплатна.`;
-    if (g.actionsLeft > 0) return `Осталось сделок: ${g.actionsLeft}. Выберите карту на руке или купите новую.`;
-    return 'Сделки закончились. Достройте что нужно и завершите ход.';
+    if (ready.length) return 'Компания собрана — нужна «Продажа». Купите у банка или на аукционе.';
+    const buildable = p.hand.filter((c) => c.type === 'stage' && (!p.table[c.ind][c.stage] || p.table[c.ind][c.stage].type === 'wild' || c.tier > p.table[c.ind][c.stage].tier));
+    if (buildable.length) return `Перетащите ${buildable.length} ${plural(buildable.length, 'этап', 'этапа', 'этапов')} в компании — это бесплатно.`;
+    if (g.actionsLeft > 0) return `Сделок: ${g.actionsLeft}. Тяните колоду в руку, карты — на 🔨 или на соперника.`;
+    return 'Сделки закончились — завершите ход.';
   }
 
   // ======================== Старт ========================
   initMenu();
   initGameEvents();
-  window.HoldingUI = { S, startGame };
+  initDrag();
+  window.HoldingUI = { S, startGame, A };
 })();

@@ -65,7 +65,46 @@
     }
     for (let k = 0; k < 6; k++) deck.push({ id: id++, type: 'tax', title: 'Налоговая', img: IMG('tax') });
     for (let k = 0; k < 6; k++) deck.push({ id: id++, type: 'sale', title: 'Продажа', img: IMG('sale') });
+    for (let k = 0; k < 4; k++) deck.push({ id: id++, type: 'lawyer', title: 'Юрист', img: IMG('lawyer') });
+    for (let k = 0; k < 4; k++) deck.push({ id: id++, type: 'share', title: 'Акция', img: IMG('share') });
     return deck;
+  }
+
+  // Связи отраслей: продажа компании приносит бонус, если у вас на столе есть 2+ этапа отрасли-поставщика.
+  const SUPPLIER = {
+    build:  { from: 'forest', why: 'Стройке нужна древесина' },
+    forest: { from: 'chem',   why: 'Лесу нужны лаки и пропитка' },
+    chem:   { from: 'build',  why: 'Химии нужны новые цеха' },
+  };
+
+  // События рынка — отдельная колода, одна карта открывается в начале каждого раунда.
+  const EVENT_TYPES = {
+    crisis:    { title: 'Кризис',              text: 'Весь раунд все компании продаются на $4 дешевле.', img: 'event-crisis' },
+    boom:      { title: 'Экономический бум',    text: 'Весь раунд все компании продаются на $3 дороже.', img: 'event-boom' },
+    gov:       { title: 'Госзаказ',             text: 'Весь раунд компании отрасли «%s» продаются на $5 дороже.', img: 'event-gov-%i' },
+    sanction:  { title: 'Санкции',              text: 'Весь раунд компании отрасли «%s» продать нельзя.', img: 'event-sanction-%i' },
+    taxfree:   { title: 'Налоговые каникулы',   text: 'Весь раунд «Налоговую» играть нельзя.', img: 'event-taxfree' },
+    inflation: { title: 'Инфляция',             text: 'Весь раунд покупка карты у банка стоит $4.', img: 'event-inflation' },
+    cheapcredit: { title: 'Льготный кредит',    text: 'Кредиты, взятые в этом раунде, возвращаются без процентов.', img: 'event-cheapcredit' },
+    stable:    { title: 'Стабильность',         text: 'Рынок спокоен: в этом раунде особых эффектов нет.', img: 'event-stable' },
+  };
+  function buildEventDeck() {
+    const list = [];
+    let id = 1000;
+    const add = (kind, ind) => {
+      const t = EVENT_TYPES[kind];
+      const short = ind ? INDUSTRIES[ind].short : '';
+      list.push({
+        id: id++, type: 'event', kind, ind: ind || null,
+        title: ind ? `${t.title}: ${short}` : t.title,
+        text: t.text.replace('%s', short),
+        img: IMG(t.img.replace('%i', ind || '')),
+      });
+    };
+    add('crisis'); add('crisis'); add('boom');
+    for (const ind of IND_ORDER) { add('gov', ind); add('sanction', ind); }
+    add('taxfree'); add('inflation'); add('cheapcredit'); add('stable');
+    return list;
   }
 
   // Что игрок может «заявить» при продаже карты в тёмную (заявка может быть блефом).
@@ -78,9 +117,12 @@
     build:  { label: '«Это Стройка»',          match: (c) => (c.type === 'stage' || c.type === 'wild') && c.ind === 'build' },
     top:    { label: '«Это карта +3»',         match: (c) => c.type === 'stage' && c.tier === 3 },
     wild:   { label: '«Это Универсальная»',    match: (c) => c.type === 'wild' },
+    lawyer: { label: '«Это Юрист»',            match: (c) => c.type === 'lawyer' },
+    share:  { label: '«Это Акция»',            match: (c) => c.type === 'share' },
   };
 
-  const api = { INDUSTRIES, IND_ORDER, STAGES, STAGE_ORDER, TIERS, BACK_IMG, CLAIMS, buildDeck };
+  const EVENT_BACK_IMG = IMG('event-back');
+  const api = { INDUSTRIES, IND_ORDER, STAGES, STAGE_ORDER, TIERS, BACK_IMG, EVENT_BACK_IMG, CLAIMS, SUPPLIER, EVENT_TYPES, buildDeck, buildEventDeck };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.HoldingCards = api;
 })(typeof window !== 'undefined' ? window : globalThis);
