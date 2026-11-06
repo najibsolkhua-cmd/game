@@ -5,12 +5,14 @@
 
   const DEFAULT_RULES = {
     startMoney: 10,     // стартовый капитал
-    seatBonus: 1,       // компенсация очерёдности: каждый следующий игрок получает +$1
+    seatBonus: null,    // компенсация очерёдности: null — по таблице SEAT_BONUS, число — +$N за место, массив — точные суммы
     startHand: 5,       // карт на руке в начале
     actionsPerTurn: 2,  // сделок за ход
-    handLimit: 7,       // лимит руки в конце хода
+    handLimit: 6,       // лимит руки в конце хода
+    stageReserve: 1,    // сколько обычных этапов можно держать в руке в конце хода (остальные — на стол)
     buyPrice: 3,        // купить у банка в тёмную
-    auctionFloor: 1,    // если на аукционе нет ставок — банк платит столько
+    sellPrice: 2,       // продать карту банку сразу
+    auctionFloor: 2,    // если на аукционе нет ставок — банк платит столько
     dumpPrice: 1,       // принудительная распродажа сверх лимита
     companyBase: 12,    // базовая цена компании
     cleanBonus: 3,      // бонус «Чистый бизнес» (без универсальных карт)
@@ -23,10 +25,12 @@
     loanPenalty: 3,     // пеня за просрочку
     sharePrice: 3,      // цена акции (получает владелец компании)
     shareCut: 1 / 3,    // доля акционера от выплаты
-    maxReshuffles: 4,   // сколько раз сброс замешивается в колоду
+    maxReshuffles: Infinity, // сброс замешивается в новую колоду сразу, как только колода кончилась
     maxOfferPrice: 15,
   };
   const DEFAULT_TARGETS = { 2: 45, 3: 40, 4: 35 };
+  const DEFAULT_MAX_ROUNDS = { 2: 22, 3: 18, 4: 16 };
+  const SEAT_BONUS = { 2: [0, 2], 3: [0, 1, 1], 4: [0, 0, 1, 1] }; // подобрано симуляцией
 
   function mulberry32(a) {
     return function () {
@@ -53,9 +57,10 @@
       this.rules = Object.assign({}, DEFAULT_RULES, opts.rules || {});
       this.useEvents = opts.events !== false;
       this.target = opts.target || DEFAULT_TARGETS[opts.players.length] || 50;
+      this.maxRounds = opts.maxRounds || DEFAULT_MAX_ROUNDS[opts.players.length] || 20;
       this.players = opts.players.map((p, i) => ({
         id: i, name: p.name, type: p.type || 'bot', avatar: p.avatar || '',
-        money: this.rules.startMoney + i * this.rules.seatBonus, hand: [], table: emptyTable(),
+        money: this.rules.startMoney + this.seatBonusFor(i, opts.players.length), hand: [], table: emptyTable(),
         shares: {},      // shares[ind] = { pid, card } — чья акция стоит на моей компании
         loan: null,      // { owe, turnsLeft }
         companiesSold: 0, earned: 0, dividends: 0,
@@ -83,6 +88,12 @@
       }
     }
 
+    seatBonusFor(i, n) {
+      const sb = this.rules.seatBonus;
+      if (sb == null) return (SEAT_BONUS[n] || [])[i] || 0;
+      return Array.isArray(sb) ? (sb[i] || 0) : i * sb;
+    }
+
     // ---------- утилиты ----------
     shuffle(arr) {
       for (let i = arr.length - 1; i > 0; i--) {
@@ -104,18 +115,23 @@
     ev(kind, ind) { return this.event && this.event.kind === kind && (ind === undefined || this.event.ind === ind); }
 
     canDraw() { return this.deck.length > 0 || (this.discard.length > 0 && this.reshuffles < this.rules.maxReshuffles); }
-    draw() {
-      if (!this.deck.length) {
-        if (this.reshuffles >= this.rules.maxReshuffles || !this.discard.length) {
-          if (!this.exhausted) { this.exhausted = true; this.say('Колода исчерпана — игра закончится после этого хода.', 'warn'); }
-          return null;
-        }
-        this.reshuffles++;
-        this.deck = this.shuffle(this.discard.splice(0));
-        this.say(`Сброс перемешан и стал новой колодой (${this.reshuffles}/${this.rules.maxReshuffles}).`, 'warn');
-        this.emit('reshuffle');
+    /** Колода кончилась — сразу замешиваем сброс в новую, чтобы на столе не было пустой колоды. */
+    refillDeck() {
+      if (this.deck.length || !this.discard.length) return;
+      if (this.reshuffles >= this.rules.maxReshuffles) {
+        if (!this.exhausted) { this.exhausted = true; this.say('Колода исчерпана — игра закончится после этого хода.', 'warn'); }
+        return;
       }
-      return this.deck.pop();
+      this.reshuffles++;
+      this.deck = this.shuffle(this.discard.splice(0));
+      this.say(`🔄 Колода закончилась — сброс перемешан в новую колоду (${this.deck.length} карт).`, 'warn');
+      this.emit('reshuffle');
+    }
+    draw() {
+      this.refillDeck();
+      const card = this.deck.pop() || null;
+      this.refillDeck();
+      return card;
     }
 
     findInHand(p, cardId) { return p.hand.findIndex((c) => c.id === cardId); }
@@ -185,14 +201,36 @@
         stage = card.stage;
       } else if (card.type === 'wild') { if (!C.STAGE_ORDER.includes(stage)) throw new Error('Выберите этап для универсальной карты'); }
       else throw new Error('Эту карту нельзя построить');
-      this.takeFromHand(p, cardId);
+      this.place(p, card, stage, false);
+      return { ok: true };
+    }
+    place(p, card, stage, forced) {
+      this.takeFromHand(p, card.id);
       const slot = p.table[card.ind];
       const old = slot[stage];
       slot[stage] = card;
       if (old) p.hand.push(old);
       const where = `${C.INDUSTRIES[card.ind].short} · ${C.STAGES[stage]}`;
-      this.say(`${p.name} строит «${card.title}» (${where})${old ? `, «${old.title}» возвращается в руку` : ''}.`, 'build', pid);
-      this.emit('build', { pid, card, stage, old });
+      this.say(`${p.name} ${forced ? 'обязан выложить' : 'строит'} «${card.title}» (${where})${old ? `, «${old.title}» возвращается в руку` : ''}.`, 'build', p.id);
+      this.emit('build', { pid: p.id, card, stage, old, forced });
+    }
+    /** Улучшит ли этап компанию: пустое место, замена универсальной или более высокий уровень. */
+    improves(p, card) {
+      if (card.type !== 'stage') return false;
+      const cur = p.table[card.ind][card.stage];
+      return !cur || cur.type === 'wild' || card.tier > cur.tier;
+    }
+
+    /** Продать карту банку сразу, рубашкой вверх (тратит сделку). */
+    sellBank(pid, cardId) {
+      this.assertAction(pid);
+      const p = this.players[pid];
+      const card = this.takeFromHand(p, cardId);
+      this.discard.push(card);
+      p.money += this.rules.sellPrice;
+      this.actionsLeft--;
+      this.say(`🏦 ${p.name} продаёт карту банку рубашкой вверх за $${this.rules.sellPrice}.`, 'sell', pid);
+      this.emit('sellBank', { pid, card });
       return { ok: true };
     }
 
@@ -476,7 +514,14 @@
     }
 
     async playTurn() {
-      if (this.current === 0) this.startRound();
+      if (this.current === 0) {
+        if (this.round >= this.maxRounds) {
+          const best = this.ranking()[0];
+          return this.finish(best, `Сыграно ${this.maxRounds} раундов — побеждает самый богатый.`);
+        }
+        this.startRound();
+      }
+      this.refillDeck();
       const p = this.cur;
       this.turn++;
       this.actionsLeft = this.rules.actionsPerTurn;
@@ -491,8 +536,29 @@
       await this.finishTurn(p);
     }
 
+    /** Рука — для сильных карт: обычных этапов можно оставить не больше stageReserve, остальные — на стол или банку по $1. */
+    async enforceReserve(p) {
+      const limit = this.rules.stageReserve;
+      const stages = p.hand.filter((c) => c.type === 'stage');
+      if (stages.length <= limit) return;
+      let keep = await this.controllers[p.id].chooseReserve(this, p.id, stages.map((c) => c.id), limit);
+      keep = new Set((keep || []).filter((id) => stages.some((c) => c.id === id)).slice(0, limit));
+      for (let guard = 0; guard < 30; guard++) {
+        const c = p.hand.find((x) => x.type === 'stage' && !keep.has(x.id));
+        if (!c) break;
+        if (this.improves(p, c)) this.place(p, c, c.stage, true);
+        else {
+          this.discard.push(this.takeFromHand(p, c.id));
+          p.money += this.rules.dumpPrice;
+          this.say(`${p.name}: «${c.title}» некуда выложить — продана банку за $${this.rules.dumpPrice}.`, 'sell', p.id);
+          this.emit('dump', { pid: p.id, card: c });
+        }
+      }
+    }
+
     async finishTurn(p) {
       this.phase = 'cleanup';
+      await this.enforceReserve(p);
       const extra = p.hand.length - this.rules.handLimit;
       if (extra > 0) {
         let ids = await this.controllers[p.id].chooseExcess(this, p.id, extra);
@@ -526,7 +592,7 @@
     }
   }
 
-  const api = { Game, DEFAULT_RULES, DEFAULT_TARGETS, mulberry32 };
+  const api = { Game, DEFAULT_RULES, DEFAULT_TARGETS, DEFAULT_MAX_ROUNDS, mulberry32 };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.HoldingEngine = api;
 })(typeof window !== 'undefined' ? window : globalThis);

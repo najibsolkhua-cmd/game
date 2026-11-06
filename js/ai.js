@@ -208,9 +208,11 @@
         if (rich && p.money >= 7 && r() < 0.35) { await g.requestBuy(pid, rich.id, 4 + Math.floor(r() * 2)); return true; }
         if (p.money >= price && g.canDraw()) { g.buyBlind(pid); return true; }
       }
-      // 4. Нет денег или рука полна — мусор на аукцион
+      // 4. Нет денег или рука полна — мусор банку сразу или на аукцион
       if (worst && worst.v <= 2.5 && (p.money < price || p.hand.length >= g.rules.handLimit - 1)) {
-        await g.auction(pid, worst.c.id, this.makeClaim(worst.c)); return true;
+        if (r() < 0.5 + this.pr.greed * 0.4) await g.auction(pid, worst.c.id, this.makeClaim(worst.c));
+        else g.sellBank(pid, worst.c.id);
+        return true;
       }
       // 5. Сплавить мусор конкретному игроку (с заявкой, возможно блефом)
       if (worst && worst.v <= 2 && r() < 0.15 + this.pr.greed * 0.2) {
@@ -232,9 +234,11 @@
         const t = opps.filter((q) => q.hand.length >= 4).sort((a, b) => b.hand.length - a.hand.length)[0];
         if (t) { await g.requestBuy(pid, t.id, 3 + Math.floor(r() * 2)); return true; }
       }
-      // 8. Разгрузить руку через аукцион
-      if (worst && worst.v <= 1.6 && r() < 0.4) {
-        await g.auction(pid, worst.c.id, this.makeClaim(worst.c)); return true;
+      // 8. Разгрузить руку
+      if (worst && worst.v <= 1.6 && r() < 0.5) {
+        if (r() < 0.5) await g.auction(pid, worst.c.id, this.makeClaim(worst.c));
+        else g.sellBank(pid, worst.c.id);
+        return true;
       }
       return false;
     }
@@ -301,6 +305,14 @@
       if (!best) return null;
       const mode = (best.gain >= 2 && p.hand.length < g.rules.handLimit + 1) ? 'take' : 'discard';
       return { ind: best.ind, stage: best.stage, mode };
+    }
+
+    async chooseReserve(g, pid, ids, limit) {
+      const p = g.players[pid];
+      // оставляем самые ценные из тех, что нельзя выгодно выложить сейчас
+      return ids.map((id) => p.hand.find((c) => c.id === id))
+        .sort((a, b) => (g.improves(p, a) - g.improves(p, b)) || (valueFor(g, p, b) - valueFor(g, p, a)))
+        .slice(0, limit).map((c) => c.id);
     }
 
     async chooseExcess(g, pid, n) {
