@@ -24,13 +24,14 @@
     loanTurns: 3,       // через сколько своих ходов
     loanPenalty: 3,     // пеня за просрочку
     sharePrice: 3,      // цена акции (получает владелец компании)
+    quickSaleRate: 0.5, // срочная продажа без карты «Продажа»
     shareCut: 1 / 3,    // доля акционера от выплаты
     maxReshuffles: Infinity, // сброс замешивается в новую колоду сразу, как только колода кончилась
     maxOfferPrice: 15,
   };
-  const DEFAULT_TARGETS = { 2: 45, 3: 40, 4: 35 };
-  const DEFAULT_MAX_ROUNDS = { 2: 22, 3: 18, 4: 16 };
-  const SEAT_BONUS = { 2: [0, 2], 3: [0, 1, 1], 4: [0, 0, 1, 1] }; // подобрано симуляцией
+  const DEFAULT_TARGETS = { 2: 60, 3: 55, 4: 50 };
+  const DEFAULT_MAX_ROUNDS = { 2: 30, 3: 26, 4: 22 };
+  const SEAT_BONUS = { 2: [0, 2], 3: [2, 0, 0], 4: [2, 0, 1, 1] }; // подобрано симуляцией
 
   function mulberry32(a) {
     return function () {
@@ -231,6 +232,7 @@
       this.actionsLeft--;
       this.say(`🏦 ${p.name} продаёт карту банку рубашкой вверх за $${this.rules.sellPrice}.`, 'sell', pid);
       this.emit('sellBank', { pid, card });
+      this.checkWin();
       return { ok: true };
     }
 
@@ -243,30 +245,59 @@
       if (!sale || sale.type !== 'sale') throw new Error('Нужна карта «Продажа»');
       const cv = this.companyValue(p, ind);
       if (cv.blocked) throw new Error(`Санкции: компании отрасли «${C.INDUSTRIES[ind].short}» в этом раунде не продаются`);
-      this.takeFromHand(p, sale.id);
+      this.discard.push(this.takeFromHand(p, sale.id));
+      const extras = cv.parts.filter((x) => x.label !== 'База' && x.label !== 'Бонусы этапов').map((x) => `${x.label} ${x.v > 0 ? '+' : '−'}$${Math.abs(x.v)}`);
+      this.payout(p, ind, cv.value, `💰 ${p.name} продаёт компанию «${C.INDUSTRIES[ind].short}» за $${cv.value}${extras.length ? ' (' + extras.join(', ') + ')' : ''}.`, cv, false);
+      return { ok: true, value: cv.value };
+    }
+
+    quickValue(p, ind) { return Math.floor(this.companyValue(p, ind).value * this.rules.quickSaleRate); }
+    /** Срочная продажа без карты «Продажа» — за половину цены, тратит сделку. */
+    quickSell(pid, ind) {
+      this.assertAction(pid);
+      const p = this.players[pid];
+      if (!this.isComplete(p, ind)) throw new Error('Компания ещё не собрана (нужны все 4 этапа)');
+      const cv = this.companyValue(p, ind);
+      if (cv.blocked) throw new Error(`Санкции: компании отрасли «${C.INDUSTRIES[ind].short}» в этом раунде не продаются`);
+      const value = this.quickValue(p, ind);
+      this.actionsLeft--;
+      this.payout(p, ind, value, `⚡ ${p.name} срочно продаёт компанию «${C.INDUSTRIES[ind].short}» без карты «Продажа» за $${value} (50% от $${cv.value}).`, cv, true);
+      return { ok: true, value };
+    }
+
+    payout(p, ind, value, text, cv, quick) {
       const cards = C.STAGE_ORDER.map((s) => p.table[ind][s]);
       for (const s of C.STAGE_ORDER) p.table[ind][s] = null;
-      this.discard.push(...cards, sale);
-      let value = cv.value;
+      this.discard.push(...cards);
+      let kept = value;
       let divTxt = '';
       const sh = p.shares[ind];
       if (sh) {
         const div = Math.round(value * this.rules.shareCut);
         const holder = this.players[sh.pid];
         holder.money += div; holder.dividends += div; holder.earned += div;
-        value -= div;
+        kept -= div;
         this.discard.push(sh.card);
         delete p.shares[ind];
         divTxt = ` Акционер ${holder.name} получает дивиденды $${div}.`;
-        this.emit('dividend', { pid: sh.pid, from: pid, value: div });
+        this.emit('dividend', { pid: sh.pid, from: p.id, value: div });
       }
-      p.money += value;
-      p.earned += value;
+      p.money += kept;
+      p.earned += kept;
       p.companiesSold++;
-      const extras = cv.parts.filter((x) => x.label !== 'База' && x.label !== 'Бонусы этапов').map((x) => `${x.label} ${x.v > 0 ? '+' : '−'}$${Math.abs(x.v)}`);
-      this.say(`💰 ${p.name} продаёт компанию «${C.INDUSTRIES[ind].short}» за $${cv.value}${extras.length ? ' (' + extras.join(', ') + ')' : ''}.${divTxt}`, 'sale', pid);
-      this.emit('companySold', { pid, ind, value: cv.value, kept: value, clean: cv.clean, synergy: cv.synergy });
-      return { ok: true, value: cv.value };
+      this.say(text + divTxt, 'sale', p.id);
+      this.emit('companySold', { pid: p.id, ind, value, kept, clean: cv.clean, synergy: cv.synergy, quick });
+      this.checkWin();
+    }
+
+    /** Мгновенная победа: кто набрал цель (за вычетом долга) — побеждает сразу. */
+    checkWin() {
+      if (this.over) return true;
+      const ok = this.players.filter((q) => this.netWorth(q) >= this.target);
+      if (!ok.length) return false;
+      const w = ok.find((q) => q.id === this.current) || ok.sort((a, b) => this.netWorth(b) - this.netWorth(a))[0];
+      this.finish(w, `${w.name} набирает $${this.netWorth(w)}${w.loan ? ' (за вычетом кредита)' : ''} — цель $${this.target} достигнута!`);
+      return true;
     }
 
     /** Взять кредит в банке (бесплатно, только один одновременно). */
@@ -361,6 +392,7 @@
         this.say(`🔨 Ставок нет — банк забирает карту за $${this.rules.auctionFloor}.`, 'sell', pid);
       }
       this.emit('auctionResult', { from: pid, winner: winner ? winner.id : null, price: best.bid, card, bids });
+      this.checkWin();
       return { ok: true, winner, price: best.bid };
     }
 
@@ -393,6 +425,7 @@
         this.say(`${t.name}: отказ${t.money < price ? ' (не хватает денег)' : ''}.`, 'reject', targetId);
       }
       this.emit('offerResult', { from: pid, to: targetId, accepted, card: accepted ? card : null });
+      this.checkWin();
       return { ok: true, accepted, card };
     }
 
@@ -422,6 +455,7 @@
       }
       this.phase = 'actions';
       this.emit('requestResult', { from: pid, to: targetId, accepted, card });
+      this.checkWin();
       return { ok: true, accepted, card };
     }
 
@@ -442,6 +476,7 @@
       this.actionsLeft--;
       this.say(`📈 ${p.name} покупает акцию компании «${C.INDUSTRIES[ind].short}» (${t.name}) за $${price}. При продаже получит треть выплаты.`, 'share', pid);
       this.emit('invest', { from: pid, to: targetId, ind });
+      this.checkWin();
       return { ok: true };
     }
 
@@ -571,7 +606,7 @@
         this.say(`${p.name} распродаёт лишние карты (${extra}) по $${this.rules.dumpPrice}.`, 'sell', p.id);
       }
       this.emit('endTurn', { pid: p.id });
-      if (this.netWorth(p) >= this.target) return this.finish(p, `${p.name} достигает $${this.target}${p.loan ? ' (за вычетом кредита)' : ''}!`);
+      if (this.checkWin()) return;
       if (this.exhausted) {
         const best = this.ranking()[0];
         return this.finish(best, 'Колода исчерпана.');

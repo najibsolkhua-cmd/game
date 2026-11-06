@@ -181,8 +181,8 @@
     el.className = 'toast' + (big ? ' big' : '');
     el.innerHTML = (card ? cardHTML(card, { zoom: false }) : '') + `<div>${text}</div>`;
     box.appendChild(el);
-    while (box.children.length > (window.innerWidth < 700 ? 2 : 4)) box.firstChild.remove();
-    setTimeout(() => { el.classList.add('out'); setTimeout(() => el.remove(), 320); }, ms || 2600);
+    while (box.children.length > (window.innerWidth < 700 ? 1 : 4)) box.firstChild.remove();
+    setTimeout(() => { el.classList.add('out'); setTimeout(() => el.remove(), 320); }, Math.min(ms || 2600, window.innerWidth < 700 ? 2200 : 99999));
   }
   function floatMoney(el, delta) {
     if (!el || !delta) return;
@@ -330,7 +330,7 @@
     async takeTurn(g, pid) {
       await ensureViewer(pid);
       S.timedOutPid = null;
-      if (S.humans.length === 1) toast('Ваш ход! Перетаскивайте карты.', null, 1500);
+      if (S.humans.length === 1 && g.round <= 2) toast('Ваш ход! Перетаскивайте карты.', null, 1500);
       startTimer(pid);
       scheduleRender();
       return new Promise((res) => { S.endTurn = res; });
@@ -582,7 +582,14 @@
         else if (d.from !== v) toast(`🏛 ${esc(f.name)} → ${esc(t.name)}: «${esc(d.card.title)}» ${d.mode === 'take' ? 'изъята' : 'в сброс'}`, d.card, 2600);
         break;
       }
-      case 'gameOver': stopTimer(); setTimeout(() => showVictory(d), 700); break;
+      case 'gameOver': {
+        stopTimer();
+        const f = S.endTurn; S.endTurn = null;
+        for (const m of Array.from(S.modals)) if (!m.o.overlayCls) m.close(m.o.dismissValue);
+        if (f) f();
+        setTimeout(() => showVictory(d), 600);
+        break;
+      }
     }
     scheduleRender();
   }
@@ -781,6 +788,23 @@
     return `📈 Акция: во все подходящие компании ${esc(q.name)} уже вложились`;
   }
 
+  async function quickSale(ind) {
+    const g = S.game, p = me();
+    if (!canAct()) return;
+    if (g.actionsLeft <= 0) { toast('🚫 Сделки на этот ход закончились — срочная продажа тратит сделку'); return; }
+    const cv = g.companyValue(p, ind), q = g.quickValue(p, ind);
+    const hasSale = p.hand.some((c) => c.type === 'sale');
+    const ok = await openModal({
+      title: `⚡ Срочная продажа: ${C.INDUSTRIES[ind].name}`,
+      html: `<p>Продать компанию <b>без карты «Продажа»</b> за половину цены: <b class="money">$${q}</b> вместо $${cv.value}. Тратит одну сделку.</p>
+        ${p.shares[ind] ? `<p style="color:var(--muted)">Акционер получит треть от $${q}.</p>` : ''}
+        ${hasSale ? '<p style="color:#ffcf6b">У вас есть «Продажа» — перетащите её на компанию и получите полную цену!</p>' : ''}`,
+      dismiss: true, dismissValue: false,
+      buttons: [{ label: 'Отмена', value: false }, { label: `Продать за $${q}`, cls: 'primary', value: true }],
+    }).result;
+    if (ok) act(() => g.quickSell(S.viewer, ind));
+  }
+
   async function showBank() {
     const g = S.game, p = me(), ok = canAct();
     const cheap = g.ev('cheapcredit');
@@ -789,6 +813,7 @@
       title: '🏦 Банк',
       html: `<div class="bank-box">
         <div class="row"><span style="font-size:24px">💵</span><div class="grow"><b>Продать карту сразу — $${g.rules.sellPrice}</b><small>Перетащите карту из руки на 🏦. Тратит сделку.</small></div></div>
+        <div class="row"><span style="font-size:24px">⚡</span><div class="grow"><b>Срочная продажа компании — 50%</b><small>Если «Продажа» не приходит: кнопка «⚡ Срочно» на собранной компании. Тратит сделку.</small></div></div>
         <div class="row"><span style="font-size:24px">🂠</span><div class="grow"><b>Купить карту вслепую — $${g.buyPrice}</b><small>Перетащите колоду в руку. Тратит сделку.</small></div></div>
         ${p.loan
           ? `<div class="row"><span style="font-size:24px">📄</span><div class="grow"><b>Ваш долг: $${p.loan.owe}</b><small>Спишется автоматически через ${p.loan.turnsLeft} ${plural(p.loan.turnsLeft, 'ход', 'хода', 'ходов')}. Не хватит денег — +$${g.rules.loanPenalty} пени.</small></div><button class="btn primary small" data-bk="repay" ${ok && p.money >= p.loan.owe ? '' : 'disabled'}>Погасить</button></div>`
@@ -907,6 +932,7 @@
         const r = check(D.payload, el);
         if (r === true) return { ok: el };
         if (!refused && typeof r === 'string') refused = { el, why: r };
+        if (refused && el.dataset.drop === 'oppco') return { refused }; // конкретная компания отказала — не подменяем другой
       }
       el = el.parentElement;
     }
@@ -936,7 +962,9 @@
     D.ghost = ghost;
     if (D.payload.kind === 'card') D.src.classList.add('dragging');
     document.body.classList.add('dragging');
-    for (const el of $$('[data-drop]')) if (accepts(D.payload, el)) el.classList.add('drop-ok');
+    const okEls = $$('[data-drop]').filter((el) => accepts(D.payload, el));
+    for (const el of okEls) if (!okEls.some((x) => x !== el && el.contains(x))) el.classList.add('drop-ok');
+    if (D.payload.kind === 'card') $('#bank').classList.add('selling');
     return true;
   }
   function moveGhost(x, y) {
@@ -956,6 +984,7 @@
     $$('.drop-ok').forEach((x) => x.classList.remove('drop-ok'));
     $$('.drop-hover').forEach((x) => x.classList.remove('drop-hover'));
     document.body.classList.remove('dragging');
+    $('#bank') && $('#bank').classList.remove('selling');
     D.src = null; D.ghost = null; D.payload = null; D.hover = null; D.moved = false;
   }
 
@@ -1046,7 +1075,11 @@
       const g = S.game;
       if (!g) return;
       const a = e.target.closest('[data-act]');
-      if (a) { if (a.dataset.act === 'end' && canAct()) endTurnNow(); return; }
+      if (a) {
+        if (a.dataset.act === 'end' && canAct()) endTurnNow();
+        if (a.dataset.act === 'quick') quickSale(a.dataset.ind);
+        return;
+      }
       if (e.target.closest('#bank')) { showBank(); return; }
       if (e.target.closest('[data-drag]')) return; // тапы по перетаскиваемым — в pointerup
       const z = e.target.closest('[data-zoom]');
@@ -1115,8 +1148,11 @@
     $('#discard-label').textContent = `Сброс ${g.discard.length}`;
     $('#event').innerHTML = g.event ? cardHTML(g.event) : backHTML({ img: C.EVENT_BACK_IMG });
     $('#event-pile').classList.toggle('hidden', !g.useEvents);
-    $('#bank').innerHTML = `<span class="z-ico">🏦</span>Банк<small>+$${g.rules.sellPrice}</small>`;
-    $('#bank-label').textContent = p.loan ? `долг $${p.loan.owe} · ${p.loan.turnsLeft} х.` : 'кредит $' + g.rules.loanAmount;
+    const repayAmt = g.ev('cheapcredit') ? g.rules.loanAmount : g.rules.loanRepay;
+    $('#bank').innerHTML = `<span class="z-ico">🏦</span>
+      <span class="idle">${p.loan ? `Долг<small>$${p.loan.owe}</small>` : `Кредит<small>+$${g.rules.loanAmount}</small>`}</span>
+      <span class="sell">Продать<small>+$${g.rules.sellPrice}</small></span>`;
+    $('#bank-label').textContent = p.loan ? `вернуть через ${p.loan.turnsLeft} х.` : `вернуть $${repayAmt}`;
 
     const cur = g.cur;
     let who, hint;
@@ -1150,7 +1186,9 @@
       if (sh) tags.push(`<span class="tag sh" title="Акционер получит треть">📈${g.players[sh.pid].avatar}</span>`);
       if (cv.blocked) tags.push('<span class="tag block">⛔</span>');
       else if (g.ev('gov', ind) || g.ev('crisis') || g.ev('boom')) tags.push('<span class="tag ev">📰</span>');
-      return `<div class="company ${n === 4 ? 'complete' : ''}" data-drop="company" data-ind="${ind}" style="--ind:${info.color}">
+      const quick = n === 4 && !cv.blocked && my && acts > 0
+        ? `<button class="btn small primary quick-btn" data-act="quick" data-ind="${ind}" title="Без карты «Продажа», за 50% цены">⚡ Срочно $${g.quickValue(p, ind)}</button>` : '';
+      return `<div class="company ${n === 4 ? 'complete' : ''}" data-drop="company" data-ind="${ind}" style="--ind:${info.color}">${quick}
         <div class="co-head" title="Нажмите — расшифровка цены"><span class="dot"></span><span class="nm">${info.short}</span><span class="tags">${tags.join('')}</span><span class="val">${n}/4 · <b>$${cv.value}</b></span></div>
         <div class="slots">${C.STAGE_ORDER.map((s) => {
           const c = p.table[ind][s];
@@ -1191,7 +1229,7 @@
       if (ready.every((i) => g.companyValue(p, i).blocked)) return '⛔ Компания собрана, но на отрасль санкции — ждите следующего раунда.';
       return '💰 Перетащите «Продажу» на собранную компанию!';
     }
-    if (ready.length) return 'Компания собрана — нужна «Продажа». Купите у банка или на аукционе.';
+    if (ready.length) return 'Компания собрана — нужна «Продажа». Или нажмите «⚡ Срочно» — продать за 50%.';
     const stages = p.hand.filter((c) => c.type === 'stage');
     const buildable = stages.filter((c) => g.improves(p, c));
     if (buildable.length) return `Перетащите ${buildable.length} ${plural(buildable.length, 'этап', 'этапа', 'этапов')} в компании — это бесплатно.`;

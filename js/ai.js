@@ -137,7 +137,7 @@
         }
       }
       // Кредит: досрочно гасим, если денег хватает с запасом
-      if (p.loan && p.money >= p.loan.owe + 4) { g.repayLoan(pid); await g.pause(300); }
+      if (!g.over && p.loan && p.money >= p.loan.owe + 4) { g.repayLoan(pid); await g.pause(300); }
     }
 
     junk(g, p) {
@@ -202,7 +202,16 @@
         }
         if (best && (best.score >= 3 || r() < this.pr.risk)) { g.invest(pid, best.q.id, best.ind, share.id); return true; }
       }
-      // 3. Компания собрана, а Продажи нет — ищем её
+      // 3. Компания собрана, а Продажи нет — срочная продажа за 50%, если это победа или ждать долго
+      if (completeNoSale) {
+        const ready = C.IND_ORDER.filter((ind) => g.isComplete(p, ind) && !g.companyValue(p, ind).blocked);
+        if (ready.length) {
+          const ind = ready.sort((a, b) => g.quickValue(p, b) - g.quickValue(p, a))[0];
+          this.waited = (this.waited || 0) + 1;
+          const wins = g.netWorth(p) + g.quickValue(p, ind) >= g.target;
+          if (wins || this.waited >= 6 || (this.waited >= 3 && r() < 0.4)) { this.waited = 0; g.quickSell(pid, ind); return true; }
+        }
+      } else this.waited = 0;
       if (completeNoSale) {
         const rich = opps.filter((q) => q.hand.length >= 3).sort((a, b) => b.hand.length - a.hand.length)[0];
         if (rich && p.money >= 7 && r() < 0.35) { await g.requestBuy(pid, rich.id, 4 + Math.floor(r() * 2)); return true; }

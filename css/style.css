@@ -274,11 +274,17 @@ select, input[type=number], input[type=text], .seat input {
 @keyframes dealIn { from { transform: translateY(-40px) rotate(-8deg) scale(.7); opacity: 0; } to { transform: none; opacity: 1; } }
 
 /* ---- Перетаскивание ---- */
-.drag-ghost { position: fixed !important; inset: auto !important; z-index: 100; pointer-events: none; transform: rotate(-4deg) scale(1.06); box-shadow: 0 18px 40px rgba(0,0,0,.55); transition: none; }
+.drag-ghost { position: fixed !important; right: auto !important; bottom: auto !important; margin: 0 !important; z-index: 100; pointer-events: none; transform: rotate(-4deg) scale(1.06); box-shadow: 0 18px 40px rgba(0,0,0,.55); transition: none; }
 body.dragging, body.dragging * { cursor: grabbing !important; }
-.drop-ok { outline: 2px dashed rgba(245,197,66,.8); outline-offset: 2px; }
-.drop-hover { outline: 3px solid var(--gold) !important; outline-offset: 2px; background-color: rgba(245,197,66,.16) !important; }
-.zone.drop-hover { transform: scale(1.06); }
+.drop-ok { outline: 2px dashed rgba(245,197,66,.85); outline-offset: -2px; }
+.drop-hover { outline: 3px solid var(--gold) !important; outline-offset: -3px; background-color: rgba(245,197,66,.16) !important; }
+.zone.drop-hover { transform: scale(1.04); }
+.zone.bank .sell { display: none; }
+.zone.bank.selling .idle { display: none; }
+.zone.bank.selling .sell { display: contents; }
+.zone.bank .idle { display: contents; }
+.zone.bank.selling { border-style: dashed; }
+.quick-btn { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); white-space: nowrap; z-index: 3; padding: 4px 8px; font-size: 12px; box-shadow: 0 4px 12px rgba(0,0,0,.4); }
 
 /* ---- Журнал ---- */
 .sidebar { position: relative; z-index: 2; border-left: 1px solid var(--line); background: rgba(0,0,0,.28); display: flex; flex-direction: column; min-height: 0; }
@@ -461,7 +467,7 @@ body.dragging, body.dragging * { cursor: grabbing !important; }
   .slots { gap: 4px; }
   .slot { font-size: 8px; border-radius: 5px; }
   .slot > .card { border-radius: 5px; }
-  .toasts { top: auto; bottom: 6px; left: 50%; right: auto; transform: translateX(-50%); width: min(330px, calc(100vw - 16px)); flex-direction: column-reverse; }
+  .toasts { top: calc(var(--top-h) + 4px); bottom: auto; left: 50%; right: auto; transform: translateX(-50%); width: min(340px, calc(100vw - 16px)); flex-direction: column; }
   .toast { font-size: 11.5px; padding: 6px 9px; gap: 8px; border-radius: 10px; }
   .toast .card, .toast.big .card { --w: 30px; }
   .toast small { display: none; }
@@ -474,3 +480,4 @@ body.dragging, body.dragging * { cursor: grabbing !important; }
 .slot .l-short { display: none; }
 .slots { container-type: inline-size; }
 @container (max-width: 300px) { .slot .l-full { display: none; } .slot .l-short { display: inline; } }
+.quick-btn:active:not(:disabled) { transform: translateX(-50%) translateY(1px); }

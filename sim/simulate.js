@@ -26,7 +26,7 @@ async function one(nPlayers, seed) {
     taxes: 0, lawyers: 0, fines: 0, auctions: 0, auctionNoBid: 0, loans: 0, blocked: 0, deals: 0 };
   let leader = null;
   g.on((type, d) => {
-    if (type === 'companySold') { m.income.company += d.kept; if (m.firstSaleRound == null) m.firstSaleRound = g.round; }
+    if (type === 'companySold') { m.income.company += d.kept; if (d.quick) m.quick = (m.quick || 0) + 1; if (m.firstSaleRound == null) m.firstSaleRound = g.round; }
     if (type === 'dividend') m.income.dividend += d.value;
     if (type === 'sellBank') m.income.bank += g.rules.sellPrice;
     if (type === 'auctionResult') { m.auctions++; if (d.winner == null) m.auctionNoBid++; m.income.auction += d.winner == null ? g.rules.auctionFloor : d.price; }
@@ -74,6 +74,6 @@ async function one(nPlayers, seed) {
     console.log('Победы по местам:', st.seatWins.map((w) => (100 * w / N).toFixed(0) + '%').join(' / '), '| по профилям:', JSON.stringify(st.profWins));
     console.log('Продано компаний:', f1(avg(st.sold)), '| первая продажа в раунде', M((m) => m.firstSaleRound || 0), '| смен лидера', M((m) => m.leadChanges), '| отрыв победителя $' + M((m) => m.margin));
     console.log('Доход за игру ($): компании', M((m) => m.income.company), 'дивиденды', M((m) => m.income.dividend), 'банк', M((m) => m.income.bank), 'аукционы', M((m) => m.income.auction), '| расход: покупки', M((m) => m.spend.buy), 'акции', M((m) => m.spend.share));
-    console.log('Налоговых', M((m) => m.taxes), '(отбито юристом', M((m) => m.lawyers) + ', штрафов', M((m) => m.fines) + ') | аукционов', M((m) => m.auctions), '(без ставок', M((m) => m.auctionNoBid) + ') | кредитов', M((m) => m.loans), '| сделок с игроками', M((m) => m.deals));
+    console.log('Налоговых', M((m) => m.taxes), '(отбито юристом', M((m) => m.lawyers) + ', штрафов', M((m) => m.fines) + ') | аукционов', M((m) => m.auctions), '(без ставок', M((m) => m.auctionNoBid) + ') | кредитов', M((m) => m.loans), '| сделок с игроками', M((m) => m.deals), '| срочных продаж', M((m) => m.quick || 0));
   }
 })();
